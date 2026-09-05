@@ -219,10 +219,11 @@ sai do registro do Windows, mudando de máquina pra máquina. 3 s deixa margem �
 estourar o nosso teto ainda sai pelo caminho normal, estourar o do SO é morte no
 meio do trabalho.
 
-**Validado** (scripts fora do repo; **Ctrl+C ainda não conferido à mão**):
+**Validado** (scripts de teste fora do repo):
 
 | evento | como | resultado |
 |---|---|---|
+| Ctrl+C | à mão, no terminal | encerra limpo |
 | Ctrl+Break | `GenerateConsoleCtrlEvent` | exit 0, log de encerramento |
 | fechar a janela | `WM_CLOSE` na janela do console | exit 0 em 171 ms, log de encerramento |
 | fechar a janela, *antes* da espera | idem | exit `0xC000013A` em 2 ms, sem log |
@@ -276,8 +277,9 @@ Decisões a tomar:
   pra alguém interpretar depois?
 
 ### 1.7 — Fechamento da fase
-- Atualizar `docs/DESIGN.md` com o que a fase fechou (build, logging, parada
-  ordenada, config).
+- Atualizar `docs/DESIGN.md` com o que a fase fechou (build, logging, config).
+  A parada ordenada já entrou junto da 1.3 (`DESIGN.md` §6), porque a restrição
+  de prazo do encerramento condiciona o writer da Fase 3.
 - Validar ponta a ponta: build limpo, boot com config válida, boot com config
   inválida, Ctrl+C e fechar a janela.
 - Publicador de teste (`mosquitto_pub` de `tools/`, ou script Python) pronto pra

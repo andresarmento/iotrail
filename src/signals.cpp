@@ -7,8 +7,6 @@
 #include <mutex>
 
 #ifdef _WIN32
-    // Guardados porque o libstdc++ do MinGW ja define os dois, e redefinir gera
-    // aviso - que aqui e' erro, por causa do -Werror.
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
     #endif
@@ -19,10 +17,6 @@
 #endif
 
 namespace signals {
-
-    // atomic, e nao volatile sig_atomic_t: no Windows tanto o handler de SIGINT
-    // quanto o do console rodam numa thread criada pelo SO, entao isto e'
-    // comunicacao entre threads, nao interrupcao de sinal.
     static std::atomic<bool> stop_flag{false};
 
     // Teto da espera do handler de fechamento. Nao e' escolha nossa: o Windows

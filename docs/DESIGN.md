@@ -121,7 +121,36 @@ sem ambiguidade.
 
 ---
 
-## 6. Ambiente e build
+## 6. Ciclo de vida do processo
+
+Sobe na ordem `logging::init()` → `signals::init()` → o resto (config na Fase 1,
+clientes na 2, writers na 3). O logging vem primeiro porque erro de qualquer um
+dos outros precisa de onde sair.
+
+**Todo pedido de parada passa por um ponto só** — `signals::request_stop()`, lido
+por `signals::stop_requested()`. Entram por ali o `SIGINT`/`SIGTERM`, os eventos
+de console do Windows e, quando existir, a API de gerência. O `main` espera em
+polling de 200 ms.
+
+**O prazo do encerramento não é nosso, é do SO.** No Windows, `CTRL_CLOSE`
+(fechar a janela), `LOGOFF` e `SHUTDOWN` matam o processo assim que o handler
+**retorna** — os "poucos segundos" são o prazo pra trabalhar lá dentro, não
+depois. Por isso o handler desses três bloqueia até o `main` avisar que terminou,
+em vez de voltar na hora. Prazo real medido nesta máquina: **5013 ms** (vem do
+registro do Windows, muda de máquina).
+
+Consequência para a Fase 3, quando parar deixar de ser barato: **drenar as filas
+e fazer o `fsync` final roda dentro do handler**, com orçamento de ~5 s menos os
+200 ms do polling, e são M filas e M `fsync` para M streams. Se não couber, a
+escolha é entre limitar a drenagem (perda conhecida) e tentar até o fim
+(arriscar ser morto no meio).
+
+**Handler não loga.** Logar chamaria `malloc` e travaria o mutex do spdlog em
+contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
+
+---
+
+## 7. Ambiente e build
 
 - **C++17 + STL.** C++20 avaliado e descartado nesta rodada; o toolchain
   suporta, então subir depois continua possível.
@@ -130,12 +159,12 @@ sem ambiguidade.
   não expõe o `mosquitto*` interno, o que fecha a porta para MQTT 5.
 - **Logging: spdlog**, assíncrono (ver §2).
 - **MSYS2 ucrt64**, CMake + Ninja. Multiplataforma é objetivo: o código
-  específico de SO fica isolado atrás de `#ifdef` em pontos nomeados
-  (localização do executável, `fsync`, `truncate`), não espalhado.
+  específico de SO fica isolado atrás de `#ifdef` em pontos nomeados (parada
+  ordenada, localização do executável, `fsync`, `truncate`), não espalhado.
 
 ---
 
-## 7. Ainda em aberto
+## 8. Ainda em aberto
 
 - Acesso dos consumidores: API HTTP + token é a direção, sem decisão fechada.
 - Índice por segmento (esparso?), política de retenção, limite de fila.
