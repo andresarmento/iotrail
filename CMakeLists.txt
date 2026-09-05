@@ -55,6 +55,7 @@ find_package(spdlog CONFIG REQUIRED)
 add_executable(iotrail
     src/main.cpp
     src/logging.cpp
+    src/signals.cpp
 )
 
 # Todo diretorio de fonte entra no include path, entao include e' sempre pelo
