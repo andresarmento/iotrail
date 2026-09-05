@@ -21,6 +21,6 @@ int main() {
 
     logging::info("IoTrail encerrando");
     logging::shutdown();
-    signals::shutdown_done();
+    signals::shutdown_done(); // Deve ser a última linha
     return 0;
 }

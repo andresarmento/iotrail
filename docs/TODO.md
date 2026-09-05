@@ -106,7 +106,7 @@ faltava era como ela entra no código.
 - **Só console** (`stdout_color_sink_mt`). Arquivo rotativo continua Fase 9.
 - **Logger assíncrono**, thread pool própria: fila de 8192, **1 worker** — mais
   de um embaralharia a ordem das linhas, que é metade do valor de um log.
-- **Overflow `overrun_oldest`, não `block`** (`logging.cpp:26-41`) — **diverge da
+- **Overflow `overrun_oldest`, não `block`** (`logging.cpp:19-21`) — **diverge da
   rodada anterior, que usava `block`.** Com `block`, fila cheia devolve o console
   ao caminho de recebimento/gravação, que é exatamente o acoplamento que o logger
   assíncrono existe pra cortar. E no Windows isso não é hipotético: clicar dentro
@@ -118,7 +118,7 @@ faltava era como ela entra no código.
   roda na thread do pool, não custa latência a quem chamou, e garante que a
   última linha antes de um crash saiu.
 - **Nível `info` fixo + `SPDLOG_LEVEL` do ambiente**
-  (`spdlog::cfg::load_env_levels()`, `logging.cpp:63`). `set SPDLOG_LEVEL=debug`
+  (`spdlog::cfg::load_env_levels()`, `logging.cpp:28`). `set SPDLOG_LEVEL=debug`
   liga debug/trace sem recompilar. Chave própria de config ficou fora de
   propósito: o logger sobe **antes** da config ser lida (senão erro de config não
   teria onde sair), então uma chave exigiria um `set_level()` posterior de
@@ -174,27 +174,27 @@ do CMake, não há como parametrizar.
 
 **Decisões tomadas:**
 
-- **`SIGINT` + `SIGTERM` + `SetConsoleCtrlHandler`** (`signals.cpp:89-93`).
+- **`SIGINT` + `SIGTERM` + `SetConsoleCtrlHandler`** (`signals.cpp:61-70`).
   `SIGINT` no Windows cobre só Ctrl+C; fechar a janela, Ctrl+Break, logoff e
   shutdown do sistema chegam pelo handler do console e de outra forma matariam o
   processo sem parada ordenada. `SIGTERM` no Windows **não é entregue por
   ninguém** — está ali pelo porte pra Linux, onde é o sinal que um supervisor
   manda.
-- **`std::atomic<bool>`, não `volatile sig_atomic_t`** (`signals.cpp:26`). No
+- **`std::atomic<bool>`, não `volatile sig_atomic_t`** (`signals.cpp:20`). No
   Windows os dois handlers rodam em thread criada pelo SO: é comunicação entre
   threads, não interrupção de sinal, e `volatile` não garante nada aí.
-- **Espera do `main` em polling de 200 ms** (`main.cpp:18`), não
+- **Espera do `main` em polling de 200 ms** (`main.cpp:19`), não
   `condition_variable`. O `main` não tem trabalho pendurado na espera, e
   notificar uma cv de dentro do handler de `SIGINT` não é async-signal-safe — se
   um dia precisar acordar na hora, o caminho é um evento do SO, não cv. O custo
   não é só latência de saída: esses 200 ms saem do prazo de fechamento abaixo.
-- **Handler não loga** (`signals.cpp:41-44`): logar chamaria `malloc` e travaria
+- **Handler não loga** (`signals.cpp:29-31`): logar chamaria `malloc` e travaria
   o mutex do spdlog em contexto de sinal. Quem anuncia a parada é o `main`,
   depois do laço. Preço aceito: o log não diz *qual* evento pediu pra parar.
 - **`#ifdef _WIN32` inline no `signals.cpp`**, sem `platform/`. A camada de
   plataforma é da Fase 3 (junto com fsync/truncate) e um `#ifdef` num arquivo só
   não é o que vai doer. A 1.4 responde igual pro `GetModuleFileNameW`.
-- **`request_stop()` público** (`signals.cpp:99`) — **diverge da rodada
+- **`request_stop()` público** (`signals.cpp:73`) — **diverge da rodada
   anterior**, que adiou pra Fase 6/7. Não custa nada e os próprios handlers
   passam a escrever a flag por ele, então há um ponto de escrita só.
 - **Nomes em `snake_case`** (`stop_requested()`, não o `stopRequested()` do
@@ -212,8 +212,8 @@ code `0xC000013A`, antes de o `main` sequer acordar dos 200 ms: não havia parad
 ordenada nenhuma. Em `CTRL_C`/`CTRL_BREAK` o `TRUE` continua bastando.
 
 Por isso o handler **bloqueia** nesses três eventos até `shutdown_done()`
-(`signals.cpp:75`, chamado em `main.cpp:35` como última linha do `main`), com
-teto de **3 s** (`signals.cpp:34`). O teto não é gosto: **o prazo real desta
+(`signals.cpp:81`, chamado em `main.cpp:24` como última linha do `main`), com
+teto de **3 s** (`signals.cpp:24`). O teto não é gosto: **o prazo real desta
 máquina foi medido em 5013 ms** (probe com handler que nunca retorna), e o valor
 sai do registro do Windows, mudando de máquina pra máquina. 3 s deixa margem —
 estourar o nosso teto ainda sai pelo caminho normal, estourar o do SO é morte no

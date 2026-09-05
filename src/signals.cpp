@@ -19,7 +19,7 @@
 namespace signals {
     static std::atomic<bool> stop_flag{false};
 
-    // Este bloco é um tratamento para fechar corrtamente o programa
+    // Este bloco é um tratamento para fechar corretamente o programa
     // por conta de casos de parada específicos do Windows
     static constexpr auto shutdown_grace = std::chrono::seconds(3);
     static std::mutex shutdown_mutex;
@@ -42,7 +42,7 @@ namespace signals {
             case CTRL_LOGOFF_EVENT:
             case CTRL_SHUTDOWN_EVENT: {
                 // Nestes três o retorno nao segura nada: o Windows mata o
-                // processo assim que este handler retorena. 
+                // processo assim que este handler retorna. 
                 request_stop();
                 // Espera o main avisar que terminou — mas não mais que 3 segundos.
                 std::unique_lock<std::mutex> lock(shutdown_mutex);
