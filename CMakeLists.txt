@@ -1,4 +1,4 @@
-# IoTrail - esqueleto de build (tarefa 1.1 do docs/TODO.md).
+# IoTrail - build (tarefas 1.1 e 1.2 do docs/TODO.md).
 #
 # Configurar e buildar, da raiz do projeto:
 #     cmake -S . -B build -G Ninja
@@ -38,16 +38,30 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
 set(IOTRAIL_MSYS2_UCRT64 "C:/msys64/ucrt64" CACHE PATH "Raiz da instalacao MSYS2 ucrt64")
 list(APPEND CMAKE_PREFIX_PATH "${IOTRAIL_MSYS2_UCRT64}")
 
+# spdlog tem pacote CMake proprio no MSYS2 (lib/cmake/spdlog), entao
+# find_package resolve include, link e dependencias sozinho - nada de
+# target_include_directories/target_link_directories na mao.
+#
+# O alvo spdlog::spdlog e' a lib COMPARTILHADA. O pacote tambem exporta
+# spdlog::spdlog_header_only, que dispensaria a DLL ao custo de recompilar os
+# headers do spdlog em cada .cpp e de um .exe bem maior (medido na rodada
+# anterior: 468 KB compartilhada contra 5,6 MB header-only + link estatico). E'
+# esta escolha que sustenta a decisao de runtime C++ dinamico ali em cima.
+find_package(spdlog CONFIG REQUIRED)
+
 # Um alvo so, fontes direto no add_executable. Biblioteca + executavel fino so
 # se pagaria pra um teste linkar o codigo, e o framework de teste ficou fora da
 # Fase 1 - reabrir quando entrar.
 add_executable(iotrail
     src/main.cpp
+    src/logging.cpp
 )
 
 # Todo diretorio de fonte entra no include path, entao include e' sempre pelo
 # nome do arquivo ("logging.h"), nunca relativo atravessando pasta.
 target_include_directories(iotrail PRIVATE src)
+
+target_link_libraries(iotrail PRIVATE spdlog::spdlog)
 
 # -Werror de proposito: o projeto comeca com zero aviso, e manter em zero e'
 # mais barato que limpar depois. Se um upgrade do GCC quebrar o build por um
@@ -68,11 +82,39 @@ target_compile_options(iotrail PRIVATE -Wall -Wextra -Wpedantic -Werror)
 # qualquer forma - linkar estatico nao eliminaria DLL nenhuma, so faria existir
 # dois runtimes C++ no mesmo processo com std::string cruzando a fronteira.
 
-# Sem copia de DLL ainda: com main.cpp vazio o .exe depende so das
-# api-ms-win-crt-*/KERNEL32 do proprio Windows (conferido com objdump -p).
-# libstdc++-6.dll e libgcc_s_seh-1.dll passam a ser necessarias na 1.2, junto
-# com a libspdlog - la a lista sai de TARGET_RUNTIME_DLLS mais o que o objdump
-# apontar, nao de lista copiada de outro projeto.
+# Copia as DLLs pro lado do .exe apos cada build, pra rodar de dentro da pasta
+# de build sem depender do PATH apontar pro MSYS2. Sao duas listas porque tem
+# origens diferentes.
+#
+# 1. DLL de alvo importado: TARGET_RUNTIME_DLLS resolve sozinho (libspdlog-1.17
+#    hoje, mosquitto na Fase 2). Preferido a uma lista escrita na mao porque nao
+#    carrega o numero de versao no nome - o CMakeLists.txt do projeto antigo
+#    fixava "libspdlog-1.17.dll" em texto, e isso quebra calado no proximo
+#    upgrade do pacote.
+add_custom_command(TARGET iotrail POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_RUNTIME_DLLS:iotrail>" "$<TARGET_FILE_DIR:iotrail>"
+    COMMAND_EXPAND_LISTS
+    VERBATIM)
+
+# 2. Runtime do compilador: nao vem de alvo importado nenhum, entao fica na mao.
+#    Esta lista nao foi copiada de lugar nenhum - e' exatamente o que o
+#    `objdump -p build/iotrail.exe` aponta hoje, tirando as api-ms-win-crt-* e a
+#    KERNEL32, que sao do proprio Windows. Nao ha libfmt-12.dll: o pacote do
+#    MSYS2 compila spdlog com SPDLOG_FMT_EXTERNAL, mas o fmt entra estatico na
+#    libspdlog (conferido com objdump -p na propria DLL).
+#    Conferir de novo sempre que uma dependencia nova entrar.
+set(IOTRAIL_RUNTIME_DLLS
+    libstdc++-6.dll
+    libgcc_s_seh-1.dll
+    libwinpthread-1.dll
+)
+foreach(dll IN LISTS IOTRAIL_RUNTIME_DLLS)
+    add_custom_command(TARGET iotrail POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${IOTRAIL_MSYS2_UCRT64}/bin/${dll}" "$<TARGET_FILE_DIR:iotrail>"
+        VERBATIM)
+endforeach()
 
 # O programa procura o iotrail.conf no proprio diretorio (tarefa 1.4), entao
 # esta copia nao e' conveniencia: sem ela nao ha config ao rodar do build. A

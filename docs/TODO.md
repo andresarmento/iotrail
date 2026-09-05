@@ -7,7 +7,7 @@ escrever a tarefa seguinte na mesma leva.
 Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocínio
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
-**Estado:** Fase 1 desmembrada em 2026-09-05, nada implementado ainda.
+**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1 e 1.2.
 
 ---
 
@@ -91,16 +91,66 @@ lista copiada de outro projeto. `TARGET_RUNTIME_DLLS` também só pode entrar na
 
 **Ambiente confirmado nesta máquina:** GCC 16.2.0, CMake 4.4.2, Ninja 1.13.2.
 
-### 1.2 — Logging
-Setup do spdlog em `logging.h`/`.cpp`.
+### 1.2 — Logging — FECHADO (2026-09-05)
 
-Decisões a tomar:
-- `spdlog::` direto nos pontos de chamada, wrapper próprio, ou `using`-declarations
-  sob um namespace `logging`?
-- Só console agora (arquivo rotativo fica pra Fase 9)?
-- Assíncrono com thread pool própria: tamanho de fila e política de overflow.
-- `init()`/`shutdown()` explícitos — com logger assíncrono, sair sem shutdown
-  perde as últimas linhas da fila.
+Setup do spdlog em `src/logging.h`/`.cpp`. A lib já estava decidida; o que
+faltava era como ela entra no código.
+
+**Decisões tomadas:**
+
+- **Nem `spdlog::` direto nem wrapper: `using`-declarations** (`logging.h:25-30`).
+  `logging.h` reexporta `trace`/`debug`/`info`/`warn`/`error`/`critical` sob o
+  namespace `logging`. Não é wrapper — sem indireção, sem sobrecarga, API `{}`
+  idêntica — mas todo ponto de chamada escreve `logging::info`. Se a lib trocar,
+  as `using` viram funções de verdade e nenhum ponto de chamada muda.
+- **Só console** (`stdout_color_sink_mt`). Arquivo rotativo continua Fase 9.
+- **Logger assíncrono**, thread pool própria: fila de 8192, **1 worker** — mais
+  de um embaralharia a ordem das linhas, que é metade do valor de um log.
+- **Overflow `overrun_oldest`, não `block`** (`logging.cpp:26-41`) — **diverge da
+  rodada anterior, que usava `block`.** Com `block`, fila cheia devolve o console
+  ao caminho de recebimento/gravação, que é exatamente o acoplamento que o logger
+  assíncrono existe pra cortar. E no Windows isso não é hipotético: clicar dentro
+  da janela do console liga o *QuickEdit selection* e **congela o stdout** até um
+  Esc — com `block`, um clique acidental na janela para a ingestão MQTT. Preço
+  aceito: o descarte é silencioso, só aparece como buraco na sequência. Perder
+  linha de log é menos grave que perder dado.
+- **Flush por mensagem** (`flush_on(trace)`). Com o logger assíncrono o flush
+  roda na thread do pool, não custa latência a quem chamou, e garante que a
+  última linha antes de um crash saiu.
+- **Nível `info` fixo + `SPDLOG_LEVEL` do ambiente**
+  (`spdlog::cfg::load_env_levels()`, `logging.cpp:63`). `set SPDLOG_LEVEL=debug`
+  liga debug/trace sem recompilar. Chave própria de config ficou fora de
+  propósito: o logger sobe **antes** da config ser lida (senão erro de config não
+  teria onde sair), então uma chave exigiria um `set_level()` posterior de
+  qualquer forma — decidir isso é assunto de 1.6, não daqui. Verificado:
+  `SPDLOG_LEVEL=off` silencia, `=debug` mostra a linha de debug.
+- **Padrão com milissegundos**: `[%H:%M:%S.%e] [%^%l%$] %v`. O projeto existe pra
+  medir latência; timestamp com resolução de segundo não correlaciona log com o
+  que o writer fez. `%t` (thread id) entra quando houver mais de uma thread.
+- **`init()`/`shutdown()` explícitos**, chamados em toda saída do `main()`. Sem o
+  `shutdown()` o processo sai com mensagens ainda na fila — inclusive a que
+  explica por que ele está saindo.
+
+**Saiu junto (a parte de build que a 1.1 deixou marcada):**
+`find_package(spdlog CONFIG REQUIRED)` + `spdlog::spdlog` (a compartilhada, não
+`spdlog::spdlog_header_only`), e a **cópia de DLL**, agora que existe alvo
+importado pra `TARGET_RUNTIME_DLLS` resolver. Duas listas por terem origens
+diferentes: `libspdlog-1.17.dll` sai do `TARGET_RUNTIME_DLLS` (sem número de
+versão em texto, que quebraria calado no próximo upgrade); `libstdc++-6.dll`,
+`libgcc_s_seh-1.dll` e `libwinpthread-1.dll` ficam na mão porque não vêm de alvo
+importado nenhum. A lista é o que o `objdump -p build/iotrail.exe` aponta hoje,
+tirando `api-ms-win-crt-*` e `KERNEL32`, que são do Windows. **Não há
+`libfmt-12.dll`**: o pacote do MSYS2 compila spdlog com `SPDLOG_FMT_EXTERNAL`,
+mas o fmt entra estático dentro da `libspdlog` (conferido com `objdump -p` na
+própria DLL). `.exe` de 738 KB.
+
+**Validado:** build limpo (zero aviso com `-Werror`), roda e imprime; e roda com
+o `PATH` sem o MSYS2 — ou seja, a cópia de DLL é o que sustenta rodar de dentro
+do `build/`, não o `PATH` da máquina.
+
+**Ressalva de ambiente desta máquina:** compilar pelo shell POSIX sandboxed
+falha com *exit 1 e nenhuma mensagem* (o GCC morre sem conseguir escrever os
+temporários). Build e execução vão pelo PowerShell.
 
 ### 1.3 — Parada ordenada e `main` mínimo
 Handler de sinal e um `main` que sobe, espera e encerra limpo.

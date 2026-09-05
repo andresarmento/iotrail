@@ -1,0 +1,8 @@
+{
+    // knowledge_base/ e' o projeto anterior, somente leitura. Tem um
+    // src/logging.h com o mesmo nome do nosso: sem esta exclusao, "ir para
+    // definicao" as vezes cai no codigo velho em vez do novo.
+    "C_Cpp.files.exclude": {
+        "**/knowledge_base": true
+    }
+}
