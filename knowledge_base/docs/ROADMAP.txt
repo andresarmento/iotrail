@@ -1,0 +1,310 @@
+IoTrail - ROADMAP pos-MVP (foco em contribuicao academica)
+Criado 2026-08-29, a partir de sintese de docs/IDEIAS.txt,
+docs/IDEIAS_ingest.txt, claude_memory/TODO.md e claude_memory/CLAUDE.md.
+NAO e o roadmap basico (esse continua sendo README.md/TODO.md, Fases
+0-9, com MVP = Fases 1-6) - este arquivo e o que vem DEPOIS, quando o
+sistema basico estiver funcionando e estavel. Nao e lista de tarefas
+imediatas, e um mapa de prioridades pra quando chegar a hora.
+
+== Quando usar este roadmap ==
+
+So atacar o conteudo daqui quando:
+- Fases 3/4 do roadmap basico (formato de segmento, escrita
+  append-only, rollover) estiverem fechadas e estaveis - benchmark ou
+  mecanismo novo em cima de um formato de dados que ainda vai mudar
+  invalida a medicao (ja registrado em IDEIAS.txt).
+- MVP (Fases 1-6: ingestao MQTT + persistencia + replay) estiver
+  funcionando ponta a ponta.
+
+Ate la, este arquivo e so referencia - nao reabrir essas discussoes do
+zero, os detalhes completos de cada ideia estao em docs/IDEIAS.txt e
+docs/IDEIAS_ingest.txt (linkados por secao abaixo).
+
+== Framing central (por que este roadmap existe) ==
+
+Registrado em claude_memory/TODO.md ("Pesquisa / decisoes em aberto")
+e detalhado em docs/IDEIAS.txt ("Pesquisa de pos-doc"): o SISTEMA em si
+(reimplementacao simplificada de conceitos tipo Kafka) NAO e, sozinho,
+uma contribuicao academica - ja existem NATS JetStream, Redpanda,
+EMQX+persistencia, VerneMQ cobrindo esse espaco. O potencial de
+contribuicao esta em duas frentes, nesta ordem de prioridade:
+
+1. METODOLOGIA de avaliacao rigorosa (latencia/energia/falhas) numa
+   plataforma de baixo custo/edge - isso sozinho ja e valido mesmo se
+   nenhum mecanismo novo for criado.
+2. MECANISMOS NOVOS que Kafka/NATS/EMQX/VerneMQ nao tem, pequenos o
+   suficiente pra um autor so implementar, que se apoiam na mesma
+   infra de medicao do item 1 (a infra de avaliacao vira tambem infra
+   de validacao do mecanismo - sinergia, nao dois projetos separados).
+
+Este roadmap prioriza construir (1) antes de (2), porque sem
+metodologia de medicao nenhum mecanismo novo tem como ser avaliado com
+rigor - e todo mecanismo do item 2 abaixo depende de medir
+latencia/energia/durabilidade pra ter argumento.
+
+== FASE 10 - Metodologia de avaliacao (fazer PRIMEIRO, antes de qualquer mecanismo novo) ==
+
+Sem isso, nenhum numero produzido depois tem credibilidade. Ver
+detalhamento completo em docs/IDEIAS.txt, secao "Pesquisa de pos-doc".
+
+- Simulador de trafego (gerador de carga): parametros independentes
+  (num. sensores, taxa por sensor, tamanho de payload, padrao temporal
+  Poisson vs. rajada correlacionada) - NAO rampa simples. Matriz
+  fatorial de carga pra achar o "joelho" da curva de latencia.
+- Definicao explicita de latencia medida (publish->enfileirado vs.
+  publish->durable em disco) com timestamp de alta resolucao embutido
+  no payload simulado, fim-a-fim sem depender de logs do sistema.
+- Medicao de memoria separando RSS do processo de paginas sujas no
+  page cache do SO (SegmentWriter produz muito page cache, nao heap).
+- Medicao de ENERGIA por hardware externo (sensor INA219 em serie,
+  ou wattimetro USB inline tipo Yocto-Watt/Otii), sincronizado por
+  timestamp com o experimento - contadores de software do SO nao sao
+  confiaveis nesse contexto. Trabalho de bancada, mas da credibilidade
+  ao numero (sem isso a secao de energia nao resiste a review).
+- Modelo de falha explicito (fault injection): corte de energia real
+  via smart plug/rele, SIGKILL, falha de I/O simulada (dm-flakey/
+  dm-delay no Linux). Rodar N vezes por tipo, metrica objetiva de dano
+  (registros/ms perdidos, offset esperado vs. offset recuperado,
+  validado por checksum).
+- Baseline comparativo: rodar pelo menos um sistema comparavel (NATS
+  JetStream ou EMQX+persistencia) com o MESMO simulador, MESMO
+  Raspberry Pi, MESMO protocolo de corte de energia - sem isso os
+  numeros do IoTrail nao tem contra o que comparar. Apache Kafka entra
+  tambem, mas como baseline de REFERENCIA/limite superior (categoria
+  diferente - JVM, multi-broker), nao como par direto: mede footprint
+  de memoria/energia/tempo de start no Pi, transforma em dado empirico
+  a afirmacao qualitativa de docs/motivacao.txt ("Kafka e marreta
+  grande demais"). Se o Kafka nem rodar bem no Pi sob a carga do
+  simulador, isso ja e resultado valido.
+
+== FASE 11 - Hash-chain + ancoragem externa (mecanismo mais barato, alta prioridade) ==
+
+Detalhamento completo (varias iteracoes de refinamento) em
+docs/IDEIAS.txt, secoes "Detalhamento da ideia 3", "Refinamentos da
+ancoragem externa", "Falta autenticidade", "Terminologia correta:
+transparency log", e "Onde guardar o hash-chain".
+
+Ordem de implementacao dentro desta fase:
+1. record_hash embutido no registro do log (substitui o checksum ja
+   planejado na Fase 3 do roadmap basico - custo zero adicional).
+2. Chain separada e ESPARSA: um elo por segmento/bloco (agg_hash), nao
+   por registro - resolve custo de storage. Guardar last_hash nos
+   metadados do segmento fechado pra costurar o rollover.
+3. Byte de VERSAO do algoritmo de hash/agregacao no formato do bloco
+   desde o inicio (0 = agg_hash simples, 1 = merkle_root) - deixa a
+   porta aberta pra Merkle depois sem migracao cara (ver Fase 16).
+4. Ancoragem externa periodica (anchor_interval proprio, independente
+   de rollover/write_interval/sync_interval) do chain_hash mais
+   recente num servico tipo OpenTimestamps - da prova de existencia
+   NUM INSTANTE, oponivel ao proprio operador do IoTrail. E o que
+   realmente entrega a garantia de "nao forjei os dados" pro cliente.
+5. Hashing assincrono fora do caminho critico de ingest, SE medicao
+   (Fase 10) mostrar que e necessario (SHA256 provavelmente nao e
+   gargalo - medir antes de assumir).
+6. Na retencao (Fase 8 do roadmap basico): descartar dados mas reter
+   os elos de 32B da chain - integridade historica com custo
+   desprezivel.
+
+Terminologia correta a usar no artigo: "transparency log" (autoridade
+unica + hash-chain/Merkle + assinatura periodica + compromisso
+publico verificavel, SEM consenso), nao "blockchain" - mesmo padrao do
+Certificate Transparency. Blockchain com consenso real foi descartado
+(nao resolve nenhum problema que o IoTrail tem - um escritor so, sem
+disputa).
+
+Checagem de literatura ja feita (2026-08-29, ver docs/IDEIAS.txt) -
+LER NA INTEGRA antes de tratar isso como contribuicao fechada:
+- arXiv 2605.00065 - "Lightweight Tamper-Evident Log Integrity
+  Verification for IoT Edge Environments: A Merkle-Tree Pipeline with
+  Adaptive Chunking" - cobre integridade via Merkle, SEM blockchain.
+  Pergunta em aberto: cobre assinatura/autenticidade, ou so integridade?
+- "A Sustainability Assessment of a Blockchain-Secured Solar Energy
+  Logger for Edge IoT Environments" (2025) - MUITO proximo (Merkle
+  batching + ancoragem em Ethereum Sepolia + avaliacao de
+  sustentabilidade em edge). Ler pra saber se o threshold de ancoragem
+  la e por tempo/tamanho (se for, a cadencia adaptativa por
+  criticidade do mecanismo 1 abaixo ainda pode ser diferencial).
+- "Static Sunlight API" (Certificate Transparency adaptado pra
+  mobile/IoT/edge) e "Certificateless data integrity auditing with
+  sparse Merkle trees for cloud-edge" (Scientific Reports, 2025).
+
+Diferenciais que sobrevivem a essa checagem (a confirmar lendo os
+papers): (a) sistema generico multi-topico/multi-sensor via MQTT, nao
+dominio unico; (b) integracao num framework unificado de trade-off
+durabilidade/energia/latencia (write_interval/sync_interval/
+anchor_interval como conjunto coerente); (c) cadencia de ancoragem
+adaptativa por criticidade semantica do conteudo, nao so tempo/tamanho
+(ver Fase 12 abaixo - e onde esse ponto se cruza com o mecanismo 1).
+
+== FASE 12 - Mecanismos de trade-off adaptativo (as ideias mais fortes de contribuicao de sistema) ==
+
+Ver docs/IDEIAS.txt, secao "Alem de medidas: mecanismos que nao
+existem em Kafka/EMQX/NATS", ideias 1 e 2 - marcadas como as mais
+fortes na propria avaliacao ja registrada (pequenas o suficiente pra
+implementar sozinho, sinergia direta com a infra de medicao da Fase
+10).
+
+1. DURABILIDADE ADAPTATIVA POR CRITICIDADE DE CONTEUDO (nao por
+   topico): sync_interval deixa de ser fixo, reage a um score leve de
+   anomalia/criticidade calculado na ingestao (valor fora de faixa,
+   topico de alarme) - forca fsync imediato daquele registro, telemetria
+   rotineira segue no ritmo relaxado normal. Encaixa direto no
+   SegmentWriter (write_interval/sync_interval ja sao o ponto de
+   extensao). Nenhum dos tres concorrentes (Kafka/NATS/EMQX) decide
+   durabilidade por MENSAGEM individual em tempo real - todos decidem
+   por topico/stream, config estatica.
+
+2. MALHA DE CONTROLE ENERGIA-DURABILIDADE: controlador (threshold
+   simples ou PID) que ajusta write_interval/sync_interval/tamanho de
+   batch conforme orcamento de energia disponivel (nivel de bateria,
+   painel solar carregando ou nao) - troca durabilidade por sobrevida
+   do dispositivo de forma explicita e mensuravel (perda esperada vs.
+   energia economizada). Reaproveita direto a infra de medicao de
+   energia da Fase 10 - a metrica vira tambem o mecanismo de controle,
+   nao so avaliacao. Nenhum dos tres concorrentes foi desenhado pra
+   bateria/energia solar limitada (assumem energia de datacenter).
+
+Ordem sugerida: implementar (1) antes de (2) - mais simples, e (2)
+pode reaproveitar o mesmo ponto de extensao (score/decisao por
+mensagem) que (1) ja cria no SegmentWriter.
+
+== FASE 13 - Autenticidade ponta-a-ponta (assinatura na origem) ==
+
+Ver docs/IDEIAS.txt, secoes "Falta autenticidade", "Assinatura na
+origem: sensor assina, IoTrail verifica e grava".
+
+Fecha a lacuna que a Fase 11 sozinha deixa aberta: hash-chain +
+assinatura do IoTrail (na ingestao) so provam integridade/nao-
+forjabilidade A PARTIR DA INGESTAO, nao autenticam o sensor fisico.
+
+- Sensor (assumido confiavel, com par de chaves Ed25519 distribuido
+  com antecedencia) assina topico+payload antes de publicar; IoTrail
+  verifica contra chave publica conhecida e grava o dado JUNTO com a
+  assinatura.
+- ANTI-REPLAY: payload assinado precisa incluir contador sequencial
+  proprio do sensor (monotonico) - nao o timestamp de chegada do
+  IoTrail. Permite detectar replay puro e gap/supressao seletiva
+  (broker comprometido descartando mensagens especificas).
+- Papel complementar, nao redundante: assinatura prova "isso e real e
+  e meu" (autenticidade por registro); hash-chain prova "nada foi
+  tirado/adicionado/embaralhado depois" (ordem e completude). Precisa
+  das duas.
+- Tres decisoes de design em aberto a resolver ao implementar: (1)
+  politica quando assinatura nao bate (descartar/gravar como "nao
+  verificado"/quarentena, configuravel); (2) distribuicao/rotacao de
+  chave publica por sensor, com registro VERSIONADO pra dados antigos
+  continuarem verificaveis; (3) reservar campo(s) no formato do
+  registro pro numero de sequencia e pra assinatura (~64 bytes fixos
+  se Ed25519).
+- Limite de escopo honesto: exige sensor com capacidade de
+  criptografia assimetrica (Ed25519 roda bem em ESP32/STM32, nao em
+  todo microcontrolador de 8 bits barato) - nasce enquadrado como
+  "sensor confiavel, configurado", nao generalizavel a qualquer
+  sensor IoT barato.
+
+== FASE 14 - Ingestao multi-topologia (LoRa/LoRaWAN) - generalizacao do sistema ==
+
+Ver docs/IDEIAS_ingest.txt, secao "Suporte a LoRa/LoRaWAN". Menos
+prioritario que Fases 11-13 pra pesquisa (e mais "engenharia de
+sistema" que mecanismo novo), mas relevante se o artigo quiser
+argumentar generalidade alem de MQTT - fortalece o diferencial (a) da
+Fase 11 ("sistema generico multi-topico/multi-sensor", nao so MQTT).
+
+- Core desacoplado de transporte via interface unica IngestSink::
+  append(Event) - MqttAdapter, HttpAdapter (webhook ChirpStack),
+  SerialAdapter (LoRa cru via concentrador) convergem no mesmo core.
+- Pontos de atencao: normalizacao de namespace do topic entre fontes
+  (mqtt/, lorawan/<devEUI>, lora/<devid>), thread-safety no append com
+  multiplos adapters concorrentes, quem preenche timestamp quando a
+  fonte nao traz (LoRa cru geralmente nao traz).
+- SerialAdapter e a peca sem equivalente pronto (parsing de frame,
+  reconexao de porta) - maior esforco de implementacao desta fase.
+
+== FASE 15 - Otimizacoes de ingestao (arquitetura, nao pesquisa em si) ==
+
+Ver docs/IDEIAS_ingest.txt completo (broker embutido descartado,
+Mosquitto em loopback, API append in-process, plugin do Mosquitto via
+MOSQ_EVT_MESSAGE). Relevante pra secao de arquitetura/desempenho do
+sistema, mas e otimizacao de engenharia, nao mecanismo novo de
+pesquisa - priorizar so depois das Fases 11-13, e so se a Fase 10
+(metodologia) mostrar que a via de ingestao (MQTT cliente/loopback)
+e de fato um gargalo relevante nos numeros.
+
+- API append in-process (iotrail_append) - ponto de extensao interno
+  unico que os outros modos (cliente MQTT, plugin Mosquitto, adapters
+  da Fase 14) chamam por baixo.
+- Plugin do Mosquitto (API v5, MOSQ_EVT_MESSAGE) - ingestao in-process
+  de verdade sem o IoTrail escrever protocolo de broker. Cuidados:
+  threading (callback roda na thread do broker, nao pode bloquear),
+  licenca EPL/EDL, versao da API (2.1.x).
+
+== FASE 16 - Extensoes de segunda linha (nichadas, ou "segundo artigo") ==
+
+Ver docs/IDEIAS.txt, ideia 4 e "Onde a Merkle tree realmente compra
+algo".
+
+- UPGRADE PRA MERKLE TREE: so vale a pena se aparecer um gatilho
+  concreto de TOPOLOGIA DE VERIFICACAO (nao de tipo de dado) - cliente
+  precisando verificar sozinho sem receber o bloco inteiro, ou
+  privacidade entre registros vizinhos que impede mostrar o bloco
+  completo numa auditoria. Sem esses gatilhos, agg_hash (Fase 11)
+  basta e Merkle nao compra nada extra. O byte de versao ja reservado
+  na Fase 11 torna esse upgrade indolor quando o gatilho aparecer.
+- PERSISTENCIA CIENTE DO DESGASTE DE CARTAO SD: co-desenhar layout de
+  segmento/rollover pra minimizar amplificacao de escrita, e/ou
+  deteccao preditiva de degradacao (padroes de erro de escrita) com
+  fallback pra buffer RAM + alerta. Bem nichado - ideia de segundo
+  artigo, nao bloqueia o primeiro.
+
+== Resumo de prioridade (visao rapida) ==
+
+Critico pro artigo (fazer nesta ordem):
+  10 (metodologia) -> 11 (hash-chain+ancoragem) -> 12 (adaptativo
+  criticidade/energia) -> 13 (assinatura/autenticidade) -> baseline
+  comparativo fechado (parte da 10, mas so roda depois de 11-13
+  estarem implementados, pra comparar o sistema completo).
+
+Fortalece mas nao bloqueia o artigo:
+  14 (multi-topologia LoRa) -> 15 (otimizacoes de ingestao).
+
+Segundo artigo / oportunista:
+  16 (Merkle upgrade, desgaste de SD).
+
+Proximo passo imediato quando este roadmap for aberto de verdade: ler
+na integra os dois papers citados na Fase 11 (arXiv 2605.00065 e o
+paper do solar energy logger) pra confirmar com precisao onde termina
+o que ja foi publicado e onde comeca o espaco livre do IoTrail.
+
+== FASE 17 - Extensoes de API/consumidor sem prioridade academica (so registro) ==
+
+Ideias de docs/IDEIAS.txt (secao "O que mais o IoTrail poderia
+prover") que NAO tem tese de pesquisa por tras - sao extensao de
+engenharia da API de leitura/consumidores (Fase 6/7/8 do roadmap
+basico) e ainda nao viraram decisao nem item de TODO em nenhum lugar.
+Registradas aqui so pra nao se perder, sem prioridade academica
+associada - avaliar como TODO normal quando as Fases 6-8 do roadmap
+basico forem atacadas de fato, nao como parte da agenda de pesquisa
+deste arquivo.
+
+- Filtro por topico na leitura com wildcard MQTT (GET /read?topic=
+  sensores/temp*), reaproveitando a semantica de wildcard (#/+) ja
+  usada pra subscrever. Baixo custo, alto valor - evita consumidor
+  filtrar client-side lendo tudo. O TODO.md ja decidiu um `topic=`
+  simples no endpoint de leitura (Fase 6), mas nao decidiu suportar
+  wildcard.
+- Erro explicito quando o offset pedido ja foi descartado por
+  retencao (Fase 8) - resposta clara tipo "seu offset expirou, comece
+  de novo do mais antigo disponivel", nao um erro generico, pra
+  consumidor que ficou muito tempo offline.
+- Endpoint de "primeiro/ultimo offset disponivel" (GET /bounds?topic=
+  x) - util pra um consumidor novo decidir se quer comecar do inicio
+  ou so do que vier dali pra frente.
+- Push/webhook opcional (em vez de so poll) pra consumidores de baixa
+  latencia tipo alertas - poll simples ja resolve a maioria dos casos
+  e e bem mais simples de implementar/operar; isso fica pra bem mais
+  tarde, so se um caso de uso concreto exigir.
+
+(Agregacao simples embutida - min/max/media por topico - foi
+explicitamente descartada em docs/IDEIAS.txt: e escopo de ferramenta
+de analytics, nao de camada de persistencia/streaming - o IoTrail deve
+continuar so entregando dados brutos.)

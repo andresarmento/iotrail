@@ -1,0 +1,19 @@
+Fase 2 — o que falta
+
+Bloco A — formato em disco
+1. ⬜ src/crc32.h — tabela de 256 entradas, polinômio IEEE
+2. ⬜ SegmentWriter no formato novo — registro de 26 B, header de segmento de 14 B
+3. ⬜ Varredura de recuperação no boot — "ab" em vez de "wb", valida CRC até o fim, trunca rabo corrompido, retoma o offset
+4. ⬜ Leitor Python novo (o de src/test_2/ não serve mais)
+
+Bloco B — multi-stream
+
+5. ⬜ Config [broker:nome] / [stream:nome] em config/iotrail.conf + validação do nome da stream
+6. ⬜ Roteamento tópico → stream por ordem de declaração, com mosquitto_topic_matches_sub()
+7. ⬜ Uma SegmentWriter por stream — map<string, SegmentWriter> no main(), roteamento no on_message
+8. ⬜ subscribe() = união dos padrões de todas as streams (mata o kTopic = "#" hardcoded)
+
+Bloco C — independentes
+
+9. ⬜ Reconexão com backoff + QoS configurável
+10. ⬜ Investigar MQTT5 (limitação do libmosquittopp 2.0.18)

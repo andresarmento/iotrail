@@ -1,0 +1,40 @@
+Sim, faz total sentido — e é exatamente a lógica que descrevi: já que write() é barato (só entrega pra page cache), não tem por que atrasá-lo. 
+O único motivo pra "esperar" antes de escrever seria batelar múltiplos registros pequenos num write() só pra economizar syscalls, mas isso só 
+importa em volumes bem altos (milhares de msgs/s) — não é o caso do IoTrail (dezenas de sensores). Então sim: escrever imediato e só ter timer
+pra fsync() é uma simplificação legítima, não uma gambiarra.
+
+Isso muda uma coisa na arquitetura, porém: se a escrita vai ser imediata, o write_interval como "polling a cada N ms" deixa de fazer sentido — 
+ele existia justamente pra implementar esse atraso deliberado. Duas formas de fazer "imediato" de verdade:
+
+1. Eliminar a fila e a thread consumidora: quem produz (futuramente, a callback do cliente MQTT) já chama write() direto no arquivo. 
+Sobra só uma thread separada rodando em loop com sleep(sync_interval) chamando fsync()/flush(). Mais simples, menos peças.
+2. Manter fila + thread consumidora, mas trocar o polling por notificação imediata (aquele condition_variable que evitamos antes 
+por simplicidade) — a produtora avisa a consumidora assim que empurra um item, ela acorda na hora e escreve. A fila continua existindo 
+só pra isolar quem produz de quem grava (bom se, no futuro, uma escrita ocasionalmente travar — a thread do cliente MQTT não fica presa nisso) 
+e preservar a ordem se um dia houver mais de um produtor.
+
+A diferença prática: na opção 1, a thread que recebe a mensagem (futuramente o callback MQTT) toca o arquivo diretamente — simples, mas se o 
+write() travar por algum motivo raro (pressão de memória, etc.), trava também o recebimento de mensagens MQTT. Na opção 2, isso fica isolado, 
+ao custo de reintroduzir uma primitiva de sincronização.
+
+Pra este protótipo eu iria de opção 1 (mais simples, e o isolamento só importa quando o produtor for de verdade um cliente MQTT — coisa da Fase 2). 
+Concorda, ou prefere já manter a separação de threads pensando na Fase 2?
+
+==========================
+
+Juntando as duas respostas: a fila que você já construiu no test_1 continua fazendo sentido manter — não pelo motivo original 
+que eu tinha dado (agrupar escritas por performance), mas por isolamento contra variância de latência de disco. O write_interval 
+nesse caso vira menos "otimização de throughput" e mais "controle de responsividade/tamanho de lote como salvaguarda", o que é uma 
+justificativa diferente mas legítima.
+
+==========================
+
+A latency consequence worth knowing
+This is a polling design, not an event-driven one (no condition_variable). The writer only checks at most once per kWriteInterval (1s). 
+So in the worst case: producer finishes, writer wakes up and still drains a non-empty final batch → loop doesn't exit yet → writer sleeps 
+another full second → wakes again, finds nothing, then exits. That means up to ~2 seconds of extra delay after the last message before main() 
+can join the writer thread and finish. That's fine for this test, but if you later want snappier shutdown, the usual fix is replacing the 
+sleep/poll with a condition_variable that the producer notifies on its last push — the writer would wake immediately instead of waiting out the interval.
+
+==========================
+

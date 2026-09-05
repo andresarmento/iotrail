@@ -1,0 +1,35 @@
+{
+    "version": 4,
+    "configurations": [
+        {
+            "name": "MSYS2 ucrt64",
+            "compilerPath": "C:/msys64/ucrt64/bin/g++.exe",
+            "intelliSenseMode": "windows-gcc-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+
+            // Fonte principal: a linha de compilacao real gerada pelo CMake
+            // (CMAKE_EXPORT_COMPILE_COMMANDS nos CMakeLists.txt). Cobre os
+            // fontes que fazem parte de cada build e acompanha qualquer lib
+            // nova sem edicao manual aqui.
+            //
+            // Sao dois builds independentes convivendo: a base reescrita em
+            // iotrail_refactory/ e o src/ antigo. A extensao aceita array e
+            // procura o arquivo aberto em cada um, na ordem.
+            "compileCommands": [
+                "${workspaceFolder}/iotrail_refactory/build/compile_commands.json",
+                "${workspaceFolder}/build/iotrail/compile_commands.json"
+            ],
+
+            // Fallback pros arquivos que NAO estao em nenhum dos dois builds:
+            // os prototipos src/test_0../test_3 e qualquer fonte novo ainda
+            // nao adicionado ao add_executable().
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/iotrail_refactory/src",
+                "${workspaceFolder}/iotrail_refactory/src/config",
+                "C:/msys64/ucrt64/include"
+            ]
+        }
+    ]
+}

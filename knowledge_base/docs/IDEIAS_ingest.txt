@@ -1,0 +1,249 @@
+IoTrail - Ideias de ingestao rapida (broker embutido vs. alternativas)
+Anotacoes de conversa, 2026-08-29. Nao sao decisoes fechadas. Ver
+docs/IDEIAS.txt pra outras ideias em aberto e claude_memory/TODO.md e
+CLAUDE.md pro que ja virou decisao registrada.
+
+== Pergunta original ==
+
+Valeria a pena colocar um servidor MQTT (broker, usando libmosquitto)
+DENTRO do IoTrail, pra servir redes que ainda nao tem broker ou que
+precisem de ingestao mais rapida (uma vez dentro do IoTrail, a
+ingestao seria imediata, sem depender de trafego externo/subscribe)?
+
+== Por que embutir um broker completo foi descartado ==
+
+- libmosquitto e a biblioteca CLIENTE, nao o broker. O broker e o
+  binario mosquitto (codigo separado, licenca EPL/EDL, arquitetura de
+  plugin propria) - embutir um broker de verdade seria escrever/adaptar
+  um daemon MQTT completo (sessoes, QoS 1/2, retained, wills,
+  keep-alive, auth), nao "so usar uma lib".
+- Mistura duas responsabilidades que valem a pena manter separadas: o
+  IoTrail e o consumidor/log persistente ("Kafka pequeno"); um broker
+  e a peca oposta do pipeline (roteamento pub/sub). Dobraria a
+  superficie de manutencao pra algo que o Mosquitto ja resolve bem.
+- O ganho de latencia so existe pra publishers no MESMO host - sensores
+  IoT reais publicam pela rede de qualquer jeito, entao na maioria dos
+  casos o custo de rede continua existindo mesmo com broker embutido.
+
+== Alternativa intermediaria: Mosquitto em 127.0.0.1 (loopback) ==
+
+Resolve boa parte do problema sem escrever codigo de broker: elimina
+rede fisica (sem placa de rede, switch, jitter, perda de pacote),
+latencia cai pra ~10-100 microssegundos. Mosquitto roda ao lado,
+IoTrail conecta como cliente em 127.0.0.1:1883 (modo cliente ja no
+roadmap). Zero codigo de protocolo servidor.
+
+O que AINDA fica no caminho vs. algo in-process:
+- Duas travessias da stack TCP/MQTT (encode -> socket -> decode ->
+  re-encode -> socket -> decode) = 2 syscalls e 2x
+  serializacao/deserializacao MQTT por mensagem.
+- 3 processos (publisher, mosquitto, iotrail) = context switches sob
+  carga alta viram o gargalo, nao mais a rede.
+- QoS 1/2 adiciona round-trips (PUBACK/PUBREC) e o Mosquitto pode estar
+  persistindo por conta propria, duplicando durabilidade que o IoTrail
+  ja faz.
+
+Tabela de ordem de grandeza (aproximada, edge tipico):
+- MQTT pela rede: ~ms, zero codigo extra.
+- Mosquitto em 127.0.0.1: ~10-100 us, minimo (so cliente).
+- Broker in-process: ~1-10 us, alto (protocolo servidor completo).
+- API append in-process: <1 us, baixo.
+
+Conclusao: pra 95% dos casos, Mosquitto em loopback e o ponto otimo -
+microssegundos atras do broker embutido, sem o peso de mantar um
+broker. A diferenca in-process so importa com throughput muito alto
+(centenas de milhares de msg/s) num unico host.
+
+== API de ingestao in-process (iotrail_append) ==
+
+Ideia central: expor uma funcao publica do IoTrail que grava direto no
+log sem passar por MQTT nenhum, pra quem roda no MESMO PROCESSO
+(linkado como biblioteca).
+
+Fluxo hoje: publisher -> MQTT -> broker -> IoTrail (cliente subscreve)
+-> grava no segmento.
+Fluxo com API: codigo do publisher -> iotrail_append(topic, payload)
+-> grava no segmento (mesma logica interna, sem MQTT no meio).
+
+Design: o handler interno que hoje processa mensagem MQTT (monta
+Record, chama active_segment_.append(), atualiza indice) vira um
+metodo publico da classe/engine principal; on_mqtt_message() passa a
+ser so mais um CHAMADOR dessa API, nao o unico caminho.
+
+Por que faz sentido: separa TRANSPORTE de ARMAZENAMENTO - MQTT vira um
+jeito de alimentar o log, nao O jeito. Da o caminho mais rapido possivel
+(chamada de funcao + append, sem serializar MQTT nem usar socket) sem
+custo extra de implementacao, porque a logica de escrita ja vai ser
+escrita de qualquer forma (Fases 3-6 do roadmap: formato do segmento,
+escrita append-only, indice). E puramente aditiva - nao obriga nada,
+quem nao roda no mesmo processo continua usando MQTT normalmente.
+
+Trade-off honesto: so serve pra produtores que compilam junto/linkam a
+lib do IoTrail. Um sensor de verdade do outro lado da rede continua
+precisando de MQTT - a API nao substitui o cliente/broker MQTT, e um
+atalho adicional pra quem e local.
+
+== Melhor achado da conversa: plugin do Mosquitto (broker in-process de verdade, sem escrever broker) ==
+
+O Mosquitto (a partir da serie 2.x) expõe uma API DE PLUGIN que roda
+DENTRO do processo do broker - o IoTrail vira um .so carregado pelo
+Mosquitto, em vez de um broker escrito do zero.
+
+Como funciona:
+- No mosquitto_plugin_init() o plugin registra callbacks via
+  mosquitto_callback_register().
+- O evento relevante e MOSQ_EVT_MESSAGE, disparado a CADA mensagem
+  publicada, com uma struct mosquitto_evt_message (topic + payload).
+- Dentro do callback: chamar engine_.append(topic, payload) - a mesma
+  API in-process descrita acima, so que agora e o Mosquitto quem chama,
+  nao o cliente MQTT do IoTrail.
+- Retornar MOSQ_ERR_SUCCESS (convencao; o broker geralmente ignora o
+  retorno desse evento especifico).
+
+Por que isso resolve o problema original melhor que qualquer outra
+opcao:
+- Ve TODAS as publicacoes sem precisar SUBSCREVER nenhum topico - mata
+  de vez a dependencia de "subscribe" que motivou a pergunta original.
+  O dado cai no codigo do IoTrail ANTES de ser roteado pra qualquer
+  subscriber.
+- E o padrao suportado oficialmente, nao gambiarra - a propria equipe
+  do Mosquitto distribui um plugin oficial de exemplo (persist-sqlite)
+  que faz exatamente isso: persistir o que passa pelo broker. O IoTrail
+  seria um "irmao" desse plugin, gravando no log sequencial em vez de
+  SQLite.
+- Zero codigo de protocolo servidor escrito pelo IoTrail - o Mosquitto
+  continua sendo o dono do protocolo MQTT; o IoTrail so consome o
+  evento.
+- Resultado final: cliente MQTT PURO do lado de quem publica (sensor
+  normal, sem saber que existe plugin nenhum) + ingestao IN-PROCESS de
+  verdade do lado do IoTrail (sem loopback, sem 2x serializacao MQTT,
+  sem 2 syscalls de socket, sem context switch entre processos).
+
+Cuidados a resolver antes de prototipar:
+1. Versao da API de plugin: usar a API v5 (Mosquitto 2.x,
+   MOSQ_EVT_* + mosquitto_callback_register). A v4 antiga
+   (mosquitto_auth_*) e legada/nao usar.
+2. Threading: o callback roda NA THREAD DO LOOP DO BROKER - o
+   append() nao pode bloquear (ex.: fsync pesado), ou trava o broker
+   inteiro pra todo mundo. Mitigacao: buffer/fila interna + flush
+   assincono (thread separada de escrita), igual ao padrao
+   write_interval/sync_interval ja usado no SegmentWriter.
+3. Licenca: o plugin roda dentro do processo do Mosquitto, sujeito a
+   licenca dele (EPL/EDL) - como .so separado normalmente e tranquilo,
+   mas confirmar antes de distribuir empacotado junto do Mosquitto.
+4. Conferir a assinatura exata dos headers (mosquitto_broker.h /
+   header do plugin) da versao 2.1.x antes de codar, mudou entre
+   versoes.
+
+== Como isso reposiciona o roadmap de ingestao ==
+
+Dois modos de ingestao coexistindo, ambos alimentando o MESMO nucleo
+(Fases 3-6: formato de segmento, append-only, indice - nao mudam nada
+pra suportar isso):
+
+1. MODO CLIENTE (ja no roadmap) - IoTrail conecta via libmosquitto/Paho
+   a um broker qualquer (proprio ou de terceiros, rede ou loopback).
+   Funciona com infra existente, ingestao fica a um hop de rede
+   (ou ~10-100us se o broker for local via 127.0.0.1).
+
+2. MODO PLUGIN (novo, opcional) - o .so do IoTrail carregado dentro do
+   Mosquitto via MOSQ_EVT_MESSAGE. Pra quem nao tem broker (o Mosquitto
+   embutido/empacotado junto da instalacao faz esse papel) ou quer
+   latencia minima. Ingestao in-process de verdade, sem o IoTrail
+   precisar ser dono de nenhum protocolo servidor.
+
+A API append in-process (iotrail_append) e a peca comum interna que
+os dois modos (e um futuro modo "biblioteca direta", sem MQTT algum)
+chamam por baixo - e o ponto de extensao unico do nucleo.
+
+== Proximo passo (nao iniciado) ==
+
+Quando for prototipar: montar o esqueleto do plugin (mosquitto_plugin_
+init() + callback de mensagem chamando um append() stub), conferindo
+antes as assinaturas atuais nos headers da serie 2.1.x do Mosquitto.
+
+== Suporte a LoRa/LoRaWAN: core desacoplado de transporte via adapters (2026-08-29) ==
+
+Motivacao: pensando em suportar LoRa (cru, via concentrador) e/ou
+LoRaWAN (via gateway comercial + servidor de rede tipo ChirpStack),
+alem do MQTT ja planejado. Conclusao: suportar varias topologias de
+transporte custa quase nada extra SE o core for desacoplado do
+transporte desde o inicio - esse e o ponto de design que amarra tudo,
+e vale decidir isso ANTES de fechar o formato de ingestao (interage
+direto com a API append in-process ja registrada na secao acima).
+
+Ideia central: uma unica interface de ingestao exposta pelo core, e
+cada topologia de rede vira um ADAPTER que so monta um evento
+generico e chama essa interface. O core nunca sabe que MQTT/LoRa/HTTP
+existem - so conhece "Event" e segmentos.
+
+Esboco da interface:
+
+  struct Event {
+      std::string topic;        // devEUI, topico MQTT, ou id logico
+      std::vector<uint8_t> payload;
+      int64_t timestamp;        // epoch ms; adapter preenche se a
+                                 // fonte nao trouxer
+  };
+
+  class IngestSink {
+  public:
+      virtual ~IngestSink() = default;
+      virtual void append(const Event& e) = 0;  // grava no segmento +
+                                                 // atualiza indice
+  };
+
+Adapters previstos:
+- MqttAdapter - subscreve topicos, Event.topic = topico MQTT. Serve
+  tambem pra LoRaWAN quando o servidor de rede (ex. ChirpStack) publica
+  via MQTT.
+- HttpAdapter - servidor HTTP minimo, cada POST de webhook do
+  ChirpStack (ou similar) vira um Event, topic = devEUI.
+- SerialAdapter - le frames da porta serial/SPI de um concentrador
+  LoRa cru, faz parse do frame, topic = id do device. E a parte que
+  ainda nao tem nada equivalente pronto (diferente do MQTT) - fica
+  como proximo passo de design se for adotado (parsing de frame,
+  reconexao da porta).
+
+Isso mapeia direto nas 3 topologias de rede distintas:
+  LoRaWAN comercial (sensores -> gateway -> ChirpStack) -> MQTT ou
+    HTTP/webhook adapter
+  LoRa cru (sensores -> concentrador proprio)           -> Serial
+    adapter
+  MQTT de outras fontes                                  -> MQTT
+    adapter
+Todos convergem no mesmo IngestSink/append() -> core (segmentos/
+indice/replay).
+
+Tres pontos de atencao no design, a resolver cedo:
+
+1. NORMALIZACAO DO TOPIC - MQTT usa string de topico livre, LoRaWAN
+   usa devEUI, LoRa cru usa algum id proprio de device; definir cedo
+   uma convencao de namespace pra nao colidir, ex.: "mqtt/<topico>",
+   "lorawan/<devEUI>", "lora/<devid>". Isso conversa direto com a
+   decisao em aberto (ver docs/IDEIAS.txt) de "log por topico vs. log
+   unico" - o topic normalizado e a chave de particionamento nos dois
+   casos.
+
+2. THREAD-SAFETY no append() - varios adapters rodando em paralelo
+   (MQTT + HTTP + serial ao mesmo tempo) = multiplos produtores
+   chamando append() concorrentemente. O core precisa serializar a
+   escrita no segmento: numa rede pequena/edge um mutex simples
+   resolve; se escalar, fila SPSC/MPSC lock-free na frente do writer.
+
+3. TIMESTAMP - decidir se e o momento da ingestao (server-side, o
+   IoTrail atribui) ou o que veio do device/rede. LoRaWAN normalmente
+   traz timestamp do gateway; serial cru geralmente nao traz nada -
+   cada adapter e responsavel por preencher um default coerente pra
+   fonte nao perder ordenacao quando falta timestamp de origem.
+
+Beneficio do design: habilita/desabilita cada topologia (MQTT, HTTP,
+serial) por CONFIGURACAO, sem recompilar o nucleo - reaproveita o
+mesmo append() interno ja pensado para a API in-process e pro plugin
+do Mosquitto (secoes acima), agora com adapters adicionais na frente
+dela em vez de so MQTT.
+
+Proximo passo (nao iniciado): esbocar o SerialAdapter em mais detalhe
+(parsing de frame do concentrador LoRa, reconexao da porta serial) -
+e a peca sem equivalente pronto, diferente do MQTT que ja tem
+libmosquitto/Paho disponivel.

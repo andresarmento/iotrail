@@ -1,0 +1,25 @@
+test_0:
+Escrita sequencial direta: grava uma lista fixa de mensagens MQTT simuladas
+uma a uma num arquivo binário, sem fila, sem threads, sem flush/fsync
+explícitos. Valida o formato do registro (timestamp + tópico + payload).
+
+test_1:
+Evolução do test_0: introduz uma thread produtora (simula o cliente MQTT
+recebendo mensagens em ritmo fixo) alimentando uma fila em memória, e uma
+thread escritora que acorda a cada write_interval, drena a fila e grava no
+arquivo. Ainda sem fsync — os dados podem ficar só na page cache do SO.
+
+test_2:
+Evolução do test_1: adiciona o sync_interval, independente do write_interval.
+A mesma thread escritora, além de gravar a cada write_interval, força a
+gravação física em disco (fsync/_commit) a cada sync_interval, limitando a
+janela de dados que poderiam ser perdidos numa queda de energia. Também
+sincroniza uma última vez ao encerrar, garantindo que o último lote não fique
+só em cache.
+
+test_3:
+Teste isolado de conexão MQTT real (não é evolução do writer): valida a lib
+libmosquittopp (MSYS2 ucrt64) conectando, subscrevendo e recebendo mensagens
+de um broker mosquitto de verdade na rede local, MQTT 3.1.1. Sem fila, sem
+escrita em disco. Validado recebendo mensagem publicada via mosquitto_pub.
+Próximo passo: encerrar a fase de test_N e migrar pra Fase 1 do projeto.
