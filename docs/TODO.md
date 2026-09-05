@@ -152,6 +152,22 @@ do `build/`, não o `PATH` da máquina.
 falha com *exit 1 e nenhuma mensagem* (o GCC morre sem conseguir escrever os
 temporários). Build e execução vão pelo PowerShell.
 
+**IntelliSense (saiu junto, `.vscode/`):** não havia `.vscode/` nenhum, e a
+extensão C/C++ rodava no default — sem o include path do projeto e tentando o
+MSVC, o que fazia `#include "logging.h"` e os headers do spdlog aparecerem como
+não encontrados. `c_cpp_properties.json` passa a apontar para o
+`build/compile_commands.json`, que o `CMAKE_EXPORT_COMPILE_COMMANDS` já gerava e
+ninguém consumia — assim flag ou include novo no `CMakeLists.txt` chega ao
+IntelliSense no próximo configure, sem manutenção. Mais `includePath` com `src`
+como fallback (o `compile_commands.json` mora em `build/`, que não vai pro git —
+num clone novo o IntelliSense ficaria cego até alguém buildar) e o
+`compilerPath` do `g++` do ucrt64, de onde saem os headers de sistema.
+O `settings.json` exclui `knowledge_base/` do banco de símbolos: ela tem um
+`src/logging.h` de mesmo nome, e "ir para definição" caía no código velho.
+**Ressalva:** o `compilerPath` é caminho fixo, ao contrário do `CMakeLists.txt`,
+que usa a variável de cache `IOTRAIL_MSYS2_UCRT64` — a extensão não lê variável
+do CMake, não há como parametrizar.
+
 ### 1.3 — Parada ordenada e `main` mínimo
 Handler de sinal e um `main` que sobe, espera e encerra limpo.
 

@@ -28,6 +28,7 @@ Consultar antes de decidir. Pontos de entrada:
 docs/          DESIGN.md, ROADMAP.md, TODO.md   (documentação viva do projeto novo)
 src/           código novo
 tools/         binários mosquitto para teste local (mosquitto_pub/sub)
+.vscode/       IntelliSense apontado para o compile_commands.json do build
 iotrail.conf   configuração-fonte, copiada para o lado do .exe no build
 build/         gerado, fora do git
 ```
@@ -35,11 +36,18 @@ build/         gerado, fora do git
 ## Ambiente
 
 - Windows, toolchain MSYS2 ucrt64 (`C:/msys64/ucrt64`)
-- CMake ≥ 3.20 + Ninja, `CMAKE_EXPORT_COMPILE_COMMANDS ON`
+- CMake ≥ 3.21 (por `TARGET_RUNTIME_DLLS`) + Ninja,
+  `CMAKE_EXPORT_COMPILE_COMMANDS ON`
 - C++17 + STL; mosquitto (MQTT 3.1.1) e spdlog vindos do MSYS2
-- Linkagem do runtime C++ (estático vs. dinâmico): decisão aberta, tarefa 1.1 —
-  ver a ressalva sobre a `libspdlog` em `docs/TODO.md`
-- DLLs de terceiros copiadas para junto do executável a cada build
+- **Runtime C++ dinâmico**, spdlog compartilhada — fechado na 1.1: a
+  `libspdlog` já é compilada contra a `libstdc++` dinâmica, então linkar
+  estático não eliminaria DLL nenhuma, só duplicaria o runtime no processo
+- DLLs de terceiros copiadas para junto do executável a cada build:
+  `TARGET_RUNTIME_DLLS` resolve as de alvo importado, o runtime do compilador
+  vai numa lista à mão (`CMakeLists.txt`)
+- **Build e execução pelo PowerShell.** Pelo shell POSIX sandboxed o `g++`
+  morre com *exit 1 e nenhum diagnóstico* — nem erro de sintaxe aparece, e o
+  erro passa a parecer do código. Editar arquivo pelo shell POSIX é normal.
 
 ## Como trabalhar aqui
 
