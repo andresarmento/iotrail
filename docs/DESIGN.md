@@ -125,7 +125,9 @@ sem ambiguidade.
 
 - **C++17 + STL.** C++20 avaliado e descartado nesta rodada; o toolchain
   suporta, então subir depois continua possível.
-- **MQTT 3.1.1 via `libmosquittopp`.** MQTT 5 não é suportado — a lib não expõe.
+- **MQTT 3.1.1 via mosquitto.** API C (`libmosquitto`) ou wrapper C++
+  (`libmosquittopp`) fica para a Fase 2. Precedente forte pela API C: o wrapper
+  não expõe o `mosquitto*` interno, o que fecha a porta para MQTT 5.
 - **Logging: spdlog**, assíncrono (ver §2).
 - **MSYS2 ucrt64**, CMake + Ninja. Multiplataforma é objetivo: o código
   específico de SO fica isolado atrás de `#ifdef` em pontos nomeados

@@ -44,23 +44,52 @@ writer/segmentos, camada de plataforma (fsync/truncate — entra junto com o
 writer), roteamento tópico → stream, e **framework de teste** (retirado da fase
 em 2026-09-05; era o item 1.4, também adiado na rodada anterior).
 
-### 1.1 — Esqueleto de build
-`CMakeLists.txt` que compila um `main.cpp` vazio. Sem lógica; o objetivo é ter o
-terreno em que as próximas tarefas caem.
+### 1.1 — Esqueleto de build — FECHADO (2026-09-05)
 
-Decisões a tomar:
-- Um alvo só (fontes direto no `add_executable`) ou biblioteca + executável fino?
-  Sem framework de teste na fase, some a razão da segunda forma — reabrir quando
-  o teste entrar.
-- Layout de pastas: `src/` plano, ou subpasta quando um assunto tiver mais de um
-  par `.h`/`.cpp`?
-- `-Wall -Wextra -Wpedantic` com ou sem `-Werror`?
-- Runtime C++ estático ou dinâmico? **Atenção:** o projeto antigo linkava
-  estático e a reescrita reverteu isso com medição — a `libspdlog-1.17.dll` é
-  compilada contra `libstdc++` dinâmica, então linkar estático faria existirem
-  dois runtimes C++ no mesmo processo com `std::string` cruzando a fronteira.
-  A decisão depende de spdlog compartilhada vs. header-only (468 KB contra
-  5,6 MB, medido).
+`CMakeLists.txt` + `src/main.cpp` vazio. Compila, linka e roda.
+
+**Decisões tomadas:**
+
+- **Um alvo só**, fontes direto no `add_executable`. Biblioteca + executável
+  fino só se pagaria pra um teste linkar o código, e o framework de teste ficou
+  fora da fase. Reabrir quando entrar.
+- **Layout plano** em `src/`, com subpasta quando um assunto tiver mais de um
+  par `.h`/`.cpp`. Todo diretório de fonte entra no include path: include é
+  sempre pelo nome do arquivo, nunca relativo atravessando pasta.
+- **spdlog compartilhada + runtime C++ dinâmico**, sem `-static-libgcc
+  -static-libstdc++`. A `libspdlog-1.17.dll` é compilada contra `libstdc++`
+  dinâmica, então a DLL acompanha o programa de qualquer forma — linkar estático
+  não eliminaria DLL nenhuma, só faria existir dois runtimes C++ no mesmo
+  processo com `std::string` cruzando a fronteira. `.exe` de ~468 KB contra
+  5,6 MB da rota header-only.
+- **`-Wall -Wextra -Wpedantic -Werror`.** Verificado que dispara de verdade
+  (variável não usada quebra o build). Escape se um upgrade do GCC quebrar:
+  `-DCMAKE_CXX_FLAGS=-Wno-error`.
+  **Só o nosso código**, e por dois motivos que se somam: a flag é por alvo,
+  então entra só na linha dos nossos `.cpp` (spdlog e mosquitto vêm compiladas
+  em DLL pelo `pacman`, nunca passam por este build); e o header de terceiro
+  dentro do nosso `.cpp` já vem como `-isystem`, porque o CMake trata assim o
+  include de alvo importado. **Não adicionar `-isystem` na mão** para
+  `ucrt64/include`: reordena a busca e quebra o `#include_next` da libstdc++
+  (testado — vira `fatal error: stdlib.h: No such file or directory`).
+- **`CMAKE_BUILD_TYPE` default `RelWithDebInfo`** (`-O2 -g`). Ninja é
+  single-config: sem isso o build sai sem `-O` e sem `-g`, e nada avisa — gap
+  que o projeto anterior tinha. O default importa porque o IoTrail existe pra
+  medir latência em edge, e número medido em `-O0` não vale nada. Override
+  verificado: `-DCMAKE_BUILD_TYPE=Debug` dá `-g` sem otimização.
+- **Saiu junto:** `cmake_minimum_required(3.21)` por `TARGET_RUNTIME_DLLS`;
+  `CMAKE_CXX_EXTENSIONS OFF` (`-std=c++17`, não `gnu++17`);
+  `CMAKE_EXPORT_COMPILE_COMMANDS ON`; e `IOTRAIL_MSYS2_UCRT64` como variável de
+  cache, pra apontar pra outra instalação sem editar o arquivo.
+
+**Nenhuma DLL é copiada ainda.** Conferido com `objdump -p` que o `.exe` com
+`main.cpp` vazio depende só das `api-ms-win-crt-*` e `KERNEL32` do próprio
+Windows. `libstdc++-6.dll` e `libgcc_s_seh-1.dll` passam a ser necessárias na
+1.2; a lista sai de `TARGET_RUNTIME_DLLS` mais o que o `objdump` apontar, não de
+lista copiada de outro projeto. `TARGET_RUNTIME_DLLS` também só pode entrar na
+1.2 — com nenhum alvo importado, o `copy` do CMake falha com a lista vazia.
+
+**Ambiente confirmado nesta máquina:** GCC 16.2.0, CMake 4.4.2, Ninja 1.13.2.
 
 ### 1.2 — Logging
 Setup do spdlog em `logging.h`/`.cpp`.

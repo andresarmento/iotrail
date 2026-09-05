@@ -36,7 +36,7 @@ build/         gerado, fora do git
 
 - Windows, toolchain MSYS2 ucrt64 (`C:/msys64/ucrt64`)
 - CMake ≥ 3.20 + Ninja, `CMAKE_EXPORT_COMPILE_COMMANDS ON`
-- C++17 + STL; libmosquittopp (MQTT 3.1.1) e spdlog vindos do MSYS2
+- C++17 + STL; mosquitto (MQTT 3.1.1) e spdlog vindos do MSYS2
 - Linkagem do runtime C++ (estático vs. dinâmico): decisão aberta, tarefa 1.1 —
   ver a ressalva sobre a `libspdlog` em `docs/TODO.md`
 - DLLs de terceiros copiadas para junto do executável a cada build
