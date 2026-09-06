@@ -6,7 +6,7 @@ Estrutura de build, organização de pastas, escolha de bibliotecas base (uma li
 2. Cliente MQTT — **FECHADA em 2026-09-06** (detalhe em `docs/TODO.md`)
 Conectar a um broker, subscrever tópicos configuráveis e receber mensagens de forma estável. Trate reconexão e QoS. Nessa etapa o "sink" pode ser só um print — o objetivo é ter o fluxo de entrada funcionando.
 
-3. Formato de armazenamento (o coração do sistema)
+3. Formato de armazenamento (o coração do sistema) — **fronteira com a 4 movida no planejamento de 2026-09-06: a 3 vai até "byte durável e recuperável no disco"; rollover e ciclo de vida do segmento ficam na 4** (`docs/TODO.md`)
 Defina o layout do segmento em disco: como cada evento é serializado (offset, timestamp, tópico, payload, tamanho, checksum). Isso é a decisão mais importante e cara de mudar depois — vale prototipar antes de escrever muito código em volta.
 
 

@@ -9,7 +9,7 @@ longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
 mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Próxima: Fase 3, formato de
-registro e writer.
+registro e writer — desmembrada em 2026-09-06, próxima tarefa: 3.1.
 
 ---
 
@@ -1050,3 +1050,156 @@ linha de log e é descartada.
   pontas (2.3).
 - SUBACK `0x80` continua **sem teste**: o broker do `tools/` é 1.6.3 e não recusa
   inscrição por ACL (2.4).
+
+---
+
+## Fase 3 — Formato de registro e writer
+
+Desmembrada em 2026-09-06, mesmo formato das anteriores: eu apresento as
+decisões em aberto → você decide → escrevo aquele pedaço → paro.
+
+**A fronteira com a Fase 4 foi movida** (decidido no planejamento). O ROADMAP
+separava "formato" de "escrita em segmentos + rollover + durabilidade"; agora:
+
+- **Fase 3** termina quando *mensagem recebida vira byte durável e
+  recuperável no disco*: formato, codificação, camada de plataforma, fila,
+  writer thread, `fsync` e recuperação no boot.
+- **Fase 4** fica com **rollover e ciclo de vida do segmento**, que é o assunto
+  de que a Fase 5 (índice) e a Fase 8 (retenção) dependem.
+
+O motivo: o formato **não se valida sem escrever e ler de verdade**, e um writer
+sem `fsync` nem recuperação não é testável como durável — seria fechar a fase
+mais cara do projeto sem evidência. O preço é uma fase maior, daí as oito
+tarefas.
+
+**Fora desta fase, de propósito:** rollover (4), índice (5), replay (6).
+
+### Herdado da base de conhecimento — não redecidir sem motivo
+
+- **A especificação já existe e está madura:**
+  `knowledge_base/docs/formato_segmento.md` (294 linhas, `format_version = 1`,
+  marcada como provisória). Header de 14 bytes, registro de 26 bytes fixos +
+  tópico + payload, CRC-32 IEEE cobrindo do byte 4 ao fim do payload,
+  little-endian, sem padding, mais o algoritmo de recuperação (§7) e um **leitor
+  de referência em Python** (§9).
+- **`write()` é barato; o timer que importa é o do `fsync`**
+  (`knowledge_base/docs/decisao_sync_write.txt`). Batelar escrita não compra
+  throughput na escala do IoTrail — a fila não existe por desempenho, existe por
+  **isolamento**: se uma escrita travar, quem recebe do broker não trava junto.
+- **Os dois timers se dimensionam por coisas diferentes:** `write_interval` pelo
+  intervalo do sensor mais rápido (menor que isso é só acordar à toa);
+  `sync_interval` pela janela de perda aceitável numa queda de energia — cada
+  `fsync` custa o mesmo independente de quantos registros acumularam.
+- **Polling tem custo no encerramento:** com laço por `sleep`, o writer pode
+  levar até ~2× `write_interval` para sair. Foi medido na rodada anterior e
+  compete diretamente com o orçamento do handler de console (1.3).
+- **Prototipado em `knowledge_base/src/test_0..test_2`:** escrita direta, fila +
+  thread escritora com `write_interval`, e `sync_interval` independente com sync
+  final no encerramento.
+- **Writer da rodada anterior:** `knowledge_base/src/segment_writer.{h,cpp}`
+  (324 linhas) — fila `deque` + mutex, uma thread, recuperação no construtor,
+  registro montado em buffer e gravado num `fwrite` só.
+
+### 3.1 — O formato: revisão e migração para `docs/`
+
+**Esta tarefa é uma conversa antes de ser código** (decidido no planejamento): a
+especificação vale para as Fases 3 a 8 inteiras e é a coisa mais cara de mudar
+depois, então ela é discutida ponto a ponto antes de virar `docs/`.
+
+Pauta da revisão:
+- **`format_version` continua 1?** A spec se declara provisória e prevê promover
+  a 2 depois de rodar com volume real.
+- **Os limites do §5:** tópico 1024, payload 1 MiB, segmento 64 MiB. O de
+  segmento é o que mais encosta no alvo edge — 64 MiB por segmento num cartão SD
+  com poucos GB, vezes N streams.
+- **Os cortes do §8** (sem `length`, `flags`, `header_len`, `reserved`,
+  `header_crc32`, `created_ms`, nome da stream): todos conscientes, mas vale
+  reconferir o `header_crc32` — o header é gravado uma vez na criação, e a spec
+  assume que ele é sincronizado ali; se não for, ele também tem exposição a
+  torn write.
+- **A janela conhecida:** `topic_len` e `payload_len` são usados **antes** de o
+  CRC poder validá-los (são eles que dizem quantos bytes ler). Os limites do §5
+  existem pra fechar essa janela. Confirmar que basta.
+- **Fan-out e duplicação:** a mesma mensagem em N streams vira N registros, cada
+  um com seu offset. É o desenho, mas é a hora de olhar o custo em disco.
+- **O que muda na migração:** referências ao código da rodada anterior
+  (`loadConfigs()`, `src/segment_writer.cpp:26-35`), nomes de constantes no
+  estilo do projeto (sem prefixo `k`), e o fato de a validação de nome de stream
+  já estar feita (1.6, `config.cpp`).
+
+### 3.2 — Registro: structs, CRC-32 e codificação (sem I/O)
+`src/storage/record.*` e `crc32.h`. Deve ser possível gerar os bytes de um
+registro e conferi-los contra o leitor Python sem tocar em disco.
+
+Decisões a tomar:
+- `#pragma pack` + `static_assert` (como a rodada anterior) ou serialização
+  campo a campo? Packed struct é prática comum, mas ponteiro para membro
+  desalinhado é UB — e o `-Werror` do projeto pode ter opinião.
+- Onde vive o buffer de montagem: um por writer, reutilizado, pra não alocar por
+  mensagem no caminho quente.
+- Os limites do §5 são checados aqui ou no `push`?
+
+### 3.3 — Camada de plataforma (`fsync`/`truncate`)
+O que a 1.3 adiou nominalmente para esta fase. `#ifdef` em módulo próprio, não
+espalhado.
+
+Decisões a tomar:
+- `FILE*` + `_commit(_fileno(f))` / `fsync(fileno(f))`, ou descritor cru?
+- Criação de diretório fica com `std::filesystem::create_directories` (não
+  precisa de `#ifdef`) — confirmar.
+- **O que fazer quando o `fsync` falha.** `EIO` é o caso em que o dado já se
+  perdeu e o SO está avisando uma vez só.
+
+### 3.4 — Escrita do segmento: header + append
+Decisões a tomar (ficam para quando a tarefa chegar):
+- `FILE*` com buffer da libc ou `write()` direto.
+- Um `fwrite` por registro montado em buffer — a rodada anterior fez assim, e o
+  motivo é bom: o CRC precisa do registro pronto antes de gravar, e uma escrita
+  única cria menos fronteiras de escrita parcial.
+- Quando o header de 14 bytes é sincronizado.
+- **Falha de escrita (disco cheio):** parar aquela stream, derrubar o processo,
+  ou contar e seguir perdendo? É decisão de perda de dado, não de código.
+
+### 3.5 — Fila e writer thread por stream
+Decisões a tomar (ficam para quando a tarefa chegar):
+- Polling ou `condition_variable`: o polling custa até 2× `write_interval` no
+  encerramento, o que compete com o orçamento do handler da 1.3.
+- **Teto da fila e política quando encher** — descartar o mais novo, o mais
+  velho, ou bloquear o recebimento. Hoje é item aberto no `DESIGN.md` §8.
+- Defaults de `write_interval` e `sync_interval`, e se viram chave de config
+  agora ou só na Fase 9.
+- O `push` **copia** o payload: o buffer da mensagem pertence à lib e morre
+  quando a callback do MQTT retorna (dívida registrada na 2.6,
+  `client.cpp:174-178`).
+
+### 3.6 — Recuperação no boot
+Implementar o §7 da spec: varredura do último segmento, descarte do rabo
+corrompido, truncagem, retomada do contador de offset.
+
+Decisões a tomar:
+- `magic`/`format_version` errados derrubam **aquela stream** ou o processo?
+- Quanto vai pro log: bytes truncados, offset retomado, tempo da varredura.
+
+### 3.7 — Encerramento com writers, dentro do orçamento
+A restrição que a 1.3 deixou anotada: drenar M filas e fazer M `fsync` **dentro
+do handler de console**, com ~5 s do SO menos os 200 ms do laço.
+
+Decisões a tomar:
+- Limitar a drenagem (perda conhecida e registrada no log) ou tentar até o fim
+  (risco de ser morto no meio da escrita)?
+- Ordem: parar os clientes MQTT primeiro, depois drenar — senão a fila recebe
+  enquanto se tenta esvaziá-la.
+- Medir contra a linha de base da 2.7: hoje o encerramento com 2 clientes
+  conectados leva **menos de 1 ms**.
+
+### 3.8 — Fechamento da fase
+- **Validação cruzada com o leitor Python** (§9 da spec) sobre arquivos gerados
+  pelo C++. É o teste que prova que o formato é o que o documento diz, e não "o
+  que o writer faz".
+- **Teste de queda:** matar o processo à força durante escrita e conferir
+  recuperação e truncagem no boot seguinte.
+- **Medições:** latência chegada→disco, custo do `fsync`, e **bytes escritos por
+  mensagem** — amplificação de escrita é a métrica de desgaste de flash, que é o
+  que importa em edge.
+- Docs, `DESIGN.md` §4 (que hoje aponta para a spec na `knowledge_base`) e
+  revisão de âncoras.
