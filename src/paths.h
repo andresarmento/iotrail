@@ -8,9 +8,7 @@
 #include <filesystem>
 
 namespace paths {
+    // Diretorio onde o executavel esta. Vazio se o SO nao souber dizer.
+    // Quem compoe o caminho da config a partir dele e' o cmdline.
     std::filesystem::path exe_dir();
-
-    // Onde esta o iotrail.conf: "-c <arquivo>" vence; sem ele, o iotrail.conf
-    // do diretorio do executavel. 
-    std::filesystem::path config_from_args(int argc, char* argv[]);
 }

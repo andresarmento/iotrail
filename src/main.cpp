@@ -4,32 +4,39 @@
  *  Copyright André Sarmento - 2026
  */
 
+#include "cmdline.h"
 #include "ini.h"
 #include "logging.h"
-#include "paths.h"
 #include "signals.h"
 #include <chrono>
-#include <filesystem>
 #include <thread>
 
 int main(int argc, char* argv[]) {
     logging::init();
 
-    // Antes dos sinais: se a linha de comando estiver errada nao ha nada pra
-    // parar de forma ordenada, e sem signals::init() ninguem espera pelo
-    // shutdown_done() no caminho de erro.
-    const std::filesystem::path config_path = paths::config_from_args(argc, argv);
-    if (config_path.empty()) {
+    // Command line options
+    const auto opts = cmdline::parse(argc, argv);
+    if (!opts) {
         logging::shutdown();
         return 1;
     }
-    logging::info("config: {}", config_path.string());
-
-    const auto sections = ini::parse_file(config_path);
+  
+    // Log level
+    if (opts->verbose == 1) {
+        logging::set_level(logging::level::debug);
+    } else if (opts->verbose >= 2) {
+        logging::set_level(logging::level::trace);
+    }
+  
+    // Config file
+    logging::debug("config: {}", opts->config.string());
+    const auto sections = ini::parse_file(opts->config);
     if (!sections) {
         logging::shutdown();
         return 1;
     }
+
+    // Testes
     logging::info("config lida: {} secoes", sections->size());
     for (const auto& sec : *sections) {
         logging::debug("  [{}:{}] linha {}, {} chaves", sec.type, sec.name, sec.line,
@@ -40,7 +47,6 @@ int main(int argc, char* argv[]) {
     }
 
     signals::init();
-
     logging::info("IoTrail subiu, Ctrl+C para encerrar");
 
     while (!signals::stop_requested()) {

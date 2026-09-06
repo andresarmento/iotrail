@@ -117,17 +117,17 @@ faltava era como ela entra no código.
 - **Flush por mensagem** (`flush_on(trace)`). Com o logger assíncrono o flush
   roda na thread do pool, não custa latência a quem chamou, e garante que a
   última linha antes de um crash saiu.
-- **Nível `info` fixo + `SPDLOG_LEVEL` do ambiente**
-  (`spdlog::cfg::load_env_levels()`, `logging.cpp:28`).
-  **No PowerShell é `$env:SPDLOG_LEVEL="debug"`** (ou `"trace"`), não
-  `set SPDLOG_LEVEL=debug` — este é sintaxe do `cmd`, e no PowerShell o `set` é
-  apelido de `Set-Variable`: cria variável de sessão, o ambiente fica vazio e o
-  programa continua em `info` sem nenhum aviso. Vale só no terminal onde foi
-  setada. Liga debug/trace sem recompilar. Chave própria de config ficou fora de
-  propósito: o logger sobe **antes** da config ser lida (senão erro de config não
-  teria onde sair), então uma chave exigiria um `set_level()` posterior de
-  qualquer forma — decidir isso é assunto de 1.6, não daqui. Verificado:
-  `SPDLOG_LEVEL=off` silencia, `=debug` mostra a linha de debug.
+- **Nível `info` fixo** (`logging.cpp:24`). Quem sobe pra debug/trace é o
+  `-v`/`-vv` da linha de comando (adendo da 1.4). Chave própria de config ficou
+  fora de propósito: o logger sobe **antes** da config ser lida (senão erro de
+  config não teria onde sair), então uma chave exigiria um `set_level()`
+  posterior de qualquer forma — que é exatamente o que o `-v` faz hoje.
+  **A variável `SPDLOG_LEVEL` existiu aqui e foi removida em 2026-09-05**
+  (`spdlog::cfg::load_env_levels()`): dois jeitos de fazer a mesma coisa, com
+  regra de precedência pra lembrar, e o menos descobrível dos dois cobrou caro —
+  no PowerShell a sintaxe do `cmd` (`set SPDLOG_LEVEL=debug`) falha **calada**,
+  porque `set` ali é apelido de `Set-Variable` e cria variável de sessão, não de
+  ambiente. Voltar custa uma linha mais o `#include <spdlog/cfg/env.h>`.
 - **Padrão com milissegundos**: `[%H:%M:%S.%e] [%^%l%$] %v`. O projeto existe pra
   medir latência; timestamp com resolução de segundo não correlaciona log com o
   que o writer fez. `%t` (thread id) entra quando houver mais de uma thread.
@@ -244,30 +244,32 @@ aceitar perda, ou tentar até o fim e arriscar ser morto no meio.
 ### 1.4 — Localização de arquivos — FECHADO (2026-09-05)
 
 `src/paths.h`/`.cpp`: descobrir o diretório do executável pra achar o
-`iotrail.conf`, mais a linha de comando do `main`.
+`iotrail.conf`, mais a linha de comando do `main`. O parsing de argumentos saiu
+daqui no adendo do `-v` (abaixo) e hoje mora em `src/cmdline.*` — as âncoras deste
+registro já apontam pra lá.
 
 **Decisões tomadas:**
 
-- **Diretório do executável, não o de trabalho** (`paths.cpp:109-116`). O
+- **Diretório do executável, não o de trabalho** (`cmdline.cpp:42-50`). O
   diretório de trabalho é de quem chama — atalho, serviço, tarefa agendada — e
   não tem relação com onde o programa foi instalado. O contrato já estava
   escrito no cabeçalho do `iotrail.conf:6-9` e na cópia do build
   (`CMakeLists.txt:121-127`); agora o código cumpre.
-- **`-c <arquivo>` sobrepõe** (`paths.cpp:89-98`). Uma flag, não argumento
+- **`-c <arquivo>` sobrepõe** (`cmdline.cpp:25-32`). Uma flag, não argumento
   posicional: posicional envelhece mal quando entrar o segundo (`--data-dir`).
   Vale pra rodar duas instâncias do mesmo binário com configs diferentes, caso
   que a própria config já prevê (`iotrail.conf:16-19`, client_id coincidente).
 - **Argumento desconhecido ou `-c` sem valor derrubam o boot** com código 1 e a
   linha de uso. Ignorar argumento errado faz o programa subir com config
   diferente da que a pessoa pediu, e ela só descobre pelo dado que não chegou.
-- **Resolvido antes de `signals::init()`** (`main.cpp:20-24`). Nesse ponto não
+- **Resolvido antes de `signals::init()`** (`main.cpp:19-23`). Nesse ponto não
   há fila nem writer, então sair é só `logging::shutdown()` e `return 1` — sem
   passar pelo `shutdown_done()`, que ninguém está esperando ainda.
 - **Só resolve o caminho, não abre nem confere existência.** Quem abre é a 1.5,
   e é lá que o erro "não achei em X" tem o `errno` pra dizer *por quê* (não
   existe, sem permissão, é um diretório). Conferir aqui daria duas mensagens
   pro mesmo problema e uma janela entre o teste e o `fopen`.
-- **`std::filesystem::path` como moeda, não `std::string`** (`paths.h:12-19`).
+- **`std::filesystem::path` como moeda, não `std::string`** (`paths.h:13`, `cmdline.h:13`).
   No Windows o `path` guarda `wchar_t` nativo, então acento no caminho
   atravessa sem passar pela codepage; e o `data/<stream>/` da Fase 3 vai
   precisar da mesma coisa. C++17 já traz, sem `-lstdc++fs` no GCC atual.
@@ -278,14 +280,14 @@ aceitar perda, ou tentar até o fim e arriscar ser morto no meio.
 **O detalhe que dá trabalho:** `GetModuleFileNameW` **não avisa por retorno**
 quando o buffer é pequeno — devolve o tamanho do próprio buffer e o "não coube"
 fica só no `GetLastError`. Daí o laço comparar `n` com o tamanho e dobrar o
-buffer (`paths.cpp:41-58`), com teto de 32768 (`paths.cpp:29`). `readlink` tem o
+buffer (`paths.cpp:27-44`), com teto de 32768 (`paths.cpp:23`). `readlink` tem o
 mesmo formato de armadilha, mais o fato de não terminar em `\0`. E é `W` de
 propósito: a versão `A` converte pra codepage ANSI e caminho acentuado vira `?`.
 
 **Limite conhecido:** `argv` é narrow e no Windows vem na codepage ANSI, então
 caminho acentuado passado em `-c` pode não sobreviver — o default (diretório do
 exe) não tem esse problema. A saída, se doer, é `CommandLineToArgvW`
-(`paths.cpp:94-97`).
+(`cmdline.cpp:30-32`).
 
 **Validado** (build limpo com `-Werror`, exe rodado de `%TEMP%`):
 
@@ -298,6 +300,46 @@ exe) não tem esse problema. A saída, se doer, é `CommandLineToArgvW`
 
 O log do caminho sai em UTF-8 (`path::string()`); console em codepage 850/1252
 mostra acento embaralhado — é display do terminal, o caminho aberto é o certo.
+
+**Adendo (2026-09-05): `-v`/`-vv` e a saída do `src/cmdline.*`.** Pedido depois
+da 1.5, quando a variável de ambiente que fazia esse papel se mostrou pouco
+descobrível — a flag aparece na linha de uso a cada erro de argumento, e vale
+também quando o programa sobe sem ambiente nenhum (botão Run do VS Code).
+
+- **`-v` = debug, `-vv` = trace** (`cmdline.cpp:33-36`). Contados: `-v -v` soma o
+  mesmo que `-vv`, e `-vvv` satura em trace (`max_verbose`, `cmdline.cpp:12`) em vez
+  de virar erro — recusar seria explicar um limite que não interessa a ninguém.
+- **Sem flag, vale o `info` que o `logging::init()` montou** (`main.cpp:26-30`).
+  A flag é a única forma de mudar o nível: a variável de ambiente que dividia
+  esse papel foi removida junto (ver 1.2). Um jeito só, sem regra de
+  precedência pra lembrar.
+- **`set_level` aplicado depois do `init()`**, não antes: o logger precisa
+  existir. É o `set_level()` posterior que o registro da 1.2 já previa como
+  inevitável. Consequência: o `-v` não alcança `debug`/`trace` que venham a
+  existir dentro do próprio `cmdline::parse()` ou do `paths::exe_dir()`. Hoje
+  não há nenhum ali.
+- **`logging.h:23-24` ganhou `namespace level = spdlog::level;` e
+  `using spdlog::set_level;`** — mesma linha da decisão da 1.2 (reexportar em vez
+  de embrulhar), então o ponto de chamada escreve
+  `logging::set_level(logging::level::debug)` sem `spdlog::` aparecer no `main`.
+- **O parsing de argumentos saiu do `paths` pro `src/cmdline.*`.** Com um segundo
+  flag, `paths::config_from_args()` era um nome que mentia: `-v` não tem nada a
+  ver com caminho. Hoje `paths` só exporta `exe_dir()` (`paths.h:13`) e o `cmdline`
+  compõe o default a partir dele (`cmdline.cpp:42-50`). O `main` recebe um
+  `cmdline::options` (`cmdline.h:11-16`), não um `path` solto.
+- **Sem `-h`/`--help` por enquanto.** A linha de uso já sai em todo erro de
+  argumento; um `-h` de verdade precisa sair com código 0, e o contrato de hoje
+  é "`nullopt` = falhou". Quando entrar, é um campo a mais em `options`.
+
+**Validado:**
+
+| caso | resultado |
+|---|---|
+| sem flag | só `[info]` |
+| `-v` | `[debug]` das seções |
+| `-vv` / `-v -v` | `[debug]` + `[trace]` dos pares |
+| `-vvv` | igual a `-vv` |
+| `-z` | erro + uso (`[-c <arquivo.conf>] [-v\|-vv]`), exit 1 |
 
 ### 1.5 — Config: leitura do arquivo — FECHADO (2026-09-05)
 
@@ -350,7 +392,7 @@ interpretar nada. O desenho reaproveita o parser da rodada anterior
 vezes) é domínio, 1.6; aspas em valor, continuação de linha e `include` não têm
 caso de uso.
 
-**Validado** (`SPDLOG_LEVEL=trace`, arquivos de teste no scratchpad):
+**Validado** (com `-vv`, arquivos de teste no scratchpad):
 
 | caso | resultado |
 |---|---|

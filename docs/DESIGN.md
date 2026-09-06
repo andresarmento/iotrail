@@ -112,7 +112,8 @@ sem ambiguidade.
 - **Onde o programa procura:** `-c <arquivo>` na linha de comando vence; sem a
   flag, é o `iotrail.conf` do **diretório do executável**, nunca o diretório de
   trabalho — este muda conforme quem chama (atalho, serviço, tarefa agendada).
-  Resolvido em `paths::config_from_args()` (`src/paths.cpp:84`).
+  Resolvido em `cmdline::parse()` (`src/cmdline.cpp:19`), sobre o
+  `paths::exe_dir()`.
 - **Config inválida derruba o boot.** Nada de fallback para um destino que
   ninguém escreveu.
 - **O arquivo é lido até o fim**, e todos os problemas vão pro log de uma vez —
@@ -133,11 +134,15 @@ sem ambiguidade.
 
 ## 6. Ciclo de vida do processo
 
-Sobe na ordem `logging::init()` → caminho da config → `signals::init()` → o resto
-(leitura da config na Fase 1, clientes na 2, writers na 3). O logging vem
+Sobe na ordem `logging::init()` → `cmdline::parse()` → `signals::init()` → o
+resto (leitura da config na Fase 1, clientes na 2, writers na 3). O logging vem
 primeiro porque erro de qualquer um dos outros precisa de onde sair. A linha de
-comando é conferida antes dos sinais (`main.cpp:20-23`): argumento errado sai com
+comando é conferida antes dos sinais (`main.cpp:19-23`): argumento errado sai com
 código 1, e nesse ponto não há nada montado pra parar de forma ordenada.
+
+**Verbosidade:** `-v` liga `debug`, `-vv` liga `trace`, aplicados logo depois do
+`init()` (`main.cpp:26-30`). Sem flag o nível é `info`. É o único jeito de mudar
+o nível — não há variável de ambiente nem chave de config.
 
 **Todo pedido de parada passa por um ponto só** — `signals::request_stop()`, lido
 por `signals::stop_requested()`. Entram por ali o `SIGINT`/`SIGTERM`, os eventos

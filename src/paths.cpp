@@ -20,8 +20,6 @@
 namespace fs = std::filesystem;
 
 namespace paths {
-    static constexpr char config_name[] = "iotrail.conf";
-    static constexpr char usage[] = "uso: iotrail [-c <arquivo.conf>]";
     static constexpr size_t path_limit = 32768;
 
     fs::path exe_dir() {
@@ -69,31 +67,4 @@ namespace paths {
         return fs::path(buf).parent_path();
     }
 
-    fs::path config_from_args(int argc, char* argv[]) {
-        fs::path from_flag;
-
-        for (int i = 1; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "-c") {
-                if (i + 1 >= argc) {
-                    logging::error("-c exige o caminho do arquivo. {}", usage);
-                    return {};
-                }
-                from_flag = argv[++i];
-            } else {
-                logging::error("argumento desconhecido: {}. {}", arg, usage);
-                return {};
-            }
-        }
-
-        if (!from_flag.empty()) {
-            return from_flag;
-        }
-
-        fs::path dir = exe_dir();
-        if (dir.empty()) {
-            return {};
-        }
-        return dir / config_name;
-    }
 }

@@ -4,7 +4,6 @@
 #include <memory>
 #include <utility>
 #include <spdlog/async.h>
-#include <spdlog/cfg/env.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 namespace logging {
@@ -24,8 +23,6 @@ namespace logging {
         logger->set_level(spdlog::level::info);
         logger->flush_on(spdlog::level::trace);
         spdlog::set_default_logger(std::move(logger));
-
-        spdlog::cfg::load_env_levels(); // SPDLOG_LEVEL=debug (ou trace) no ambiente.
     }
 
     void shutdown() { 
