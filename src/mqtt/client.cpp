@@ -171,6 +171,10 @@ namespace mqtt {
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
 
+        // msg e o payload dentro dele pertencem a lib e morrem quando esta
+        // callback retorna. Nesta fase ninguem guarda nada, entao nao ha copia;
+        // o push na fila da Fase 3 TEM que copiar, senao a writer thread le
+        // memoria que a lib ja reaproveitou.
         const char* topic = msg->topic != nullptr ? msg->topic : "";
 
         // streams_ e' imutavel desde a construcao e pertence so a este cliente,

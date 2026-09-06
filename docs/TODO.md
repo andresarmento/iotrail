@@ -8,7 +8,8 @@ Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocíni
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
-mesma data; 2.1 a 2.5 fechadas em 2026-09-06. Próxima tarefa: 2.6.
+mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Próxima: Fase 3, formato de
+registro e writer.
 
 ---
 
@@ -706,7 +707,7 @@ conecta e fica conectado.
 - **Falha no `start()` derruba o boot** (`main.cpp:69-73`): `mosquitto_new` ou
   `loop_start` falhando é falta de recurso local, não broker fora do ar — este
   nem aparece aqui, porque o `connect_async` devolve sucesso com o host morto.
-- **`on_log` mapeado por nível** (`client.cpp:141-154`): `MOSQ_LOG_ERR` e
+- **`on_log` mapeado por nível** (`client.cpp:236-250`): `MOSQ_LOG_ERR` e
   `WARNING` viram nosso `warn`; `MOSQ_LOG_DEBUG` vira **`trace`**, não `debug`,
   porque a lib loga cada PINGREQ/PINGRESP e a cada 60 s isso poluiria o `-v` de
   quem está depurando outra coisa.
@@ -732,7 +733,7 @@ uma thread parada dentro do `connect()` do SO — com host que engole SYN
 de 3 s do handler da 1.3. Com `force`, **112 ms**.
 
 Então quem decide é a **nossa** flag, e é o "conectado **agora**"
-(`client.cpp:100`), não o "já conectou alguma vez": um cliente que conectou e
+(`client.cpp:81`), não o "já conectou alguma vez": um cliente que conectou e
 está no meio de uma retentativa tem a thread no mesmo `connect()` bloqueante.
 Corrida aceita e anotada: se a conexão subir entre o `load()` e o `loop_stop`,
 o broker vê um TCP fechado na marra em vez de um DISCONNECT — irrelevante num
@@ -754,7 +755,7 @@ Cronologia medida, broker desligado e religado no meio:
 Os 60 s são o keepalive, não coincidência: refazendo com `keepalive_s = 10`, o
 aviso saiu em **10,014 s**. Com `connect_async` a lib não percebe o TCP que
 falhou; ela só declara a conexão morta quando o timer de keepalive estoura, e é
-aí que chama `on_disconnect` (nossa linha `client.cpp:111`) e entra no ciclo de
+aí que chama `on_disconnect` (nossa linha `client.cpp:232`) e entra no ciclo de
 reconexão. As tentativas seguintes são invisíveis — não há callback por
 tentativa, e o `sending CONNECT` do log da lib só sai quando o TCP conecta —
 mas estão acontecendo, tanto que a conexão subiu no instante em que o broker
@@ -861,21 +862,21 @@ O cliente passa a pedir tópicos ao broker. Entrega de mensagem ainda não: o
 
 **Decisões tomadas:**
 
-- **O cliente recebe as streams do seu broker** (`client.h:22`,
+- **O cliente recebe as streams do seu broker** (`client.h:24`,
   `main.cpp:67-71`): `vector<const config::stream*>` apontando pra dentro do
   `settings`, que é declarado antes dos clientes no `main` e destruído depois
   deles. Ponteiro e não cópia porque a 2.5 vai precisar da identidade da stream,
   não só dos padrões — e porque ninguém muda esses dados depois do boot.
-- **SUBSCRIBE dentro do `on_connect`** (`client.cpp:102-138`), não no `start()`:
+- **SUBSCRIBE dentro do `on_connect`** (`client.cpp:111-146`), não no `start()`:
   com `clean_session=true` o broker esquece as inscrições a cada queda, então
   toda reconexão precisa refazê-las. Verificado derrubando e subindo o broker:
   as três inscrições saem de novo sozinhas.
 - **Um SUBSCRIBE por padrão**, não `subscribe_multiple`. O SUBACK volta com o
-  `mid`, e um mapa `mid → padrão` (`client.h:45`) permite dizer **qual**
+  `mid`, e um mapa `mid → padrão` (`client.h:48`) permite dizer **qual**
   inscrição o broker recusou. Com `subscribe_multiple` a mensagem seria "o
   broker recusou uma inscrição", sem dizer qual — o tipo de log inútil que o
   projeto vem evitando. Custo: N pacotes por conexão, uma vez.
-- **Dedup dos padrões** (`client.cpp:110-120`): duas streams do mesmo broker
+- **Dedup dos padrões** (`client.cpp:119-129`): duas streams do mesmo broker
   podem declarar o mesmo tópico. Medido com 4 padrões declarados → 3 SUBSCRIBEs.
 - **QoS 0, como constante** (`client.cpp:14`), sem chave de config. Discutido e
   adiado de propósito: com QoS 1 a lib manda o PUBACK sozinha quando o callback
@@ -890,7 +891,7 @@ O cliente passa a pedir tópicos ao broker. Entrega de mensagem ainda não: o
 
 **Bug encontrado no próprio teste:** o resumo contava os padrões *tentados*, não
 os aceitos — com um padrão inválido, o log dizia "1 inscrição pedida" quando
-nenhuma tinha saído. Agora são duas variáveis (`client.cpp:110-111`): a lista de
+nenhuma tinha saído. Agora são duas variáveis (`client.cpp:119-120`): a lista de
 dedup, que inclui os que falharam, e o contador, que só sobe quando a lib aceita
 enviar.
 
@@ -906,7 +907,7 @@ enviar.
 
 ### 2.5 — Roteamento tópico → stream — FECHADO (2026-09-06)
 
-`client::on_message` (`client.cpp:167-215`): a mensagem que chega vira "tópico X
+`client::on_message` (`client.cpp:167-218`): a mensagem que chega vira "tópico X
 → stream Y". Contadores por stream e sink de verdade continuam na 2.6.
 
 **Decisões tomadas:**
@@ -919,14 +920,14 @@ enviar.
   planejamento. A assinatura certa depende do que o writer da Fase 3 vai querer
   (registro pronto? payload cru? slot pré-alocado?), e desfazer abstração errada
   custa mais que trocar o corpo de uma função.
-- **Timestamp carimbado na chegada** (`client.cpp:170-173`), `system_clock` em
+- **Timestamp carimbado na chegada** (`client.cpp:170-172`), `system_clock` em
   ms, já nesta fase — mesmo sem ninguém consumir. Se ficasse pra Fase 3, o risco
   era alguém carimbar no writer, e aí o valor passaria a incluir o tempo de fila,
   contrariando o `DESIGN.md` §3 sem que nada acusasse.
-- **`mosquitto_topic_matches_sub` da lib** (`client.cpp:190`), não matcher
+- **`mosquitto_topic_matches_sub` da lib** (`client.cpp:194`), não matcher
   próprio: `+` no meio do nível, `#` só no fim e o fato de `#` não casar `$SYS`
   são cantos onde implementação à mão erra.
-- **Fan-out para todas as streams que casam** (`client.cpp:184-201`), com um
+- **Fan-out para todas as streams que casam** (`client.cpp:188-206`), com um
   `break` no primeiro padrão que casa **dentro** de cada stream — um padrão já
   resolve a stream, os outros dela não mudam nada.
 - **O payload não é impresso.** A linha de `trace` traz tópico, stream, tamanho
@@ -937,7 +938,7 @@ enviar.
   reconfigura o terminal de quem está lendo o log** — verificado na época
   publicando `ESC[31mX`, que saía como `a.[31mX`.
 - **Tópico sem stream: aviso na primeira ocorrência + total no encerramento**
-  (`client.cpp:203-213` e `client.cpp:88-93`). O contador é atômico porque é
+  (`client.cpp:208-217` e `client.cpp:87-92`). O contador é atômico porque é
   escrito na thread da lib e lido no `stop()`; a leitura acontece depois do join,
   mas o atômico dispensa raciocinar sobre isso.
 
@@ -959,23 +960,93 @@ decisão desta fase; virou caso de teste.)
 | `$share/g1/casa/#` | aviso na 1ª mensagem, silêncio nas seguintes |
 | encerramento após 3 órfãs | `3 mensagem(ns) sem stream no total`, antes do "encerrado" |
 
-### 2.6 — Sink temporário e parada
-Decisões a tomar:
-- Sink = contador por stream + linha em `debug`, **sem fila** (a fila entra com o
-  writer, Fase 3). Onde os contadores vivem e com que periodicidade aparecem.
-- `stop()` com a distinção disconnect/force (os ~11 s), ordem no encerramento e o
-  orçamento do handler de console da 1.3 (~5 s menos os 200 ms do polling) —
-  agora com N clientes pra fechar lá dentro.
-- O buffer da mensagem pertence à lib: nesta fase ninguém guarda nada, mas
-  registrar que o `push` da Fase 3 copia, pra não virar ponteiro solto depois.
+### 2.6 — Sink temporário e parada — FECHADO (2026-09-06), **sem código**
 
-### 2.7 — Fechamento da fase
-- **Publicador de teste**, que saiu da 1.7: `tools/mosquitto_pub.exe`, com
-  `tools/mosquitto.exe` subindo broker local — testar sem depender da rede nem do
-  broker de casa.
-- Validar: broker no ar; broker fora do ar no boot; broker caindo no meio e
-  voltando; dois brokers; tópico não mapeado; padrão recusado no SUBACK; Ctrl+C e
-  fechar a janela **com clientes conectados** (o encerramento passa a ter
-  trabalho de verdade dentro do handler).
-- Docs + revisão das âncoras `arquivo:linha`, que a Fase 1 mostrou não ser tarefa
-  avulsa.
+A tarefa esvaziou: o que ela previa ou já tinha saído antes, ou não se justifica.
+
+- **O "sink de print" já existe.** O ROADMAP dizia que nesta fase o sink podia
+  ser só um print, e a linha de `trace` da 2.5 (`tópico → stream, bytes, ts`) é
+  exatamente isso. Não falta sink; falta writer, que é Fase 3.
+- **O contador por stream foi descartado** — decisão do André, e o argumento é
+  bom: ele morreria na Fase 3 **e nasceria duplicado**. Cada stream vai ter seu
+  **offset** (`DESIGN.md:61-63`), monotônico, começando em 0 e incrementando de 1
+  por registro. O offset *é* a contagem, e ainda por cima é persistente e
+  sobrevive a reinício. Um contador em RAM ao lado seria uma segunda fonte para o
+  mesmo número — o mesmo erro que a 1.6 evitou ao não derivar `topics` por broker
+  na config. Sem contador, a pergunta "com que periodicidade ele aparece" some
+  junto.
+- **`stop()` e ordem de encerramento já estavam prontos:** o `stop()` com a
+  regra de `force` foi puxado pra 2.2 (com o achado do `disconnect` que devolve
+  SUCCESS mesmo sem conexão), e a ordem — parar e destruir os clientes antes do
+  `lib_cleanup` — está no `main.cpp:93-94` desde então.
+
+**O que sobrou de concreto:** um comentário no `on_message` (`client.cpp:174-178`)
+registrando que `msg` e o payload pertencem à lib e morrem quando a callback
+retorna — nesta fase ninguém guarda nada, mas o `push` da Fase 3 **tem** que
+copiar, senão a writer thread lê memória que a lib já reaproveitou. É o tipo de
+regra que, se não estiver escrita ao lado do código, vira ponteiro solto três
+fases depois.
+
+**A medição foi pra 2.7:** cronometrar o encerramento com clientes conectados e
+tráfego, como linha de base pro dia em que houver fila e `fsync` dentro do mesmo
+orçamento do handler (~5 s do SO menos os 200 ms do laço).
+
+### 2.7 — Fechamento da fase — FECHADO (2026-09-06)
+
+**Publicador de teste:** `tools/mosquitto.exe` subindo brokers locais em 1883 e
+1884, e `tools/mosquitto_pub.exe` publicando — tudo sem depender da rede nem do
+broker de casa. Foi o que permitiu testar duas conexões simultâneas, queda e
+volta de broker, e tráfego durante o encerramento.
+
+**Build do zero** (`build/` apagado antes): 10 alvos, **zero aviso** com
+`-Werror`. O `objdump -p` no `.exe` mostra só as 6 DLLs esperadas; `build/` fecha
+em **9,56 MB de DLL** mais um `.exe` de 4,58 MB (com `-g`; ~93% disso é
+informação de depuração, medido na 1.7).
+
+**Validação ponta a ponta**, com dois brokers e três streams (uma delas com
+padrão sobreposto a outra):
+
+| caso | resultado |
+|---|---|
+| dois brokers no ar | ambos conectam; 2 inscrições num, 1 no outro |
+| 60 mensagens durante a execução | roteadas: `temperatura` 30, `temp_exata` 30, `vibracao` 30 |
+| fan-out sob tráfego | as 30 de `casa/temp` entraram nas **duas** streams que casam |
+| broker cai no meio | `conexao perdida - a lib reconecta` |
+| broker volta | reconecta em **7 s** (backoff) e **refaz as 2 inscrições** |
+| mensagem depois da volta | roteada de novo — a re-subscrição funcionou de fato, não só no log |
+| broker fora do ar o tempo todo | `conexao inicial falhou` em **30,011 s** = o keepalive default |
+| Ctrl+C com 2 clientes conectados | encerra em **172 ms** |
+| fechar a janela com 2 conectados | encerra em **22 ms** |
+
+**A medição que a 2.6 mandou pra cá:** com 2 clientes conectados e 60 mensagens
+trafegadas, o `clients.clear()` — parar e destruir os dois clientes — roda em
+**menos de 1 ms**: no log, `IoTrail encerrando` e os dois `encerrado` saem no
+mesmo milissegundo. O total de 172 ms do Ctrl+C é quase inteiramente a latência
+do polling de 200 ms do `main`, não trabalho de encerramento.
+
+Isso é **linha de base, não conforto**: hoje não há nada pra drenar. Na Fase 3 o
+mesmo ponto passa a ter M filas pra esvaziar e M `fsync` pra fazer, dentro do
+mesmo orçamento do handler de console (~5 s do SO menos os 200 ms do laço,
+medidos na 1.3). O número de hoje é contra o que comparar.
+
+**Âncoras revisadas:** 14 `arquivo:linha` do `TODO.md` tinham andado — o
+`client.cpp` cresceu ~50 linhas entre a 2.4 e a 2.6, e edições de comentário
+deslocaram o resto. Conferidas uma a uma contra o conteúdo, não só contra o
+tamanho do arquivo.
+
+**Fase 2 fechada.** O que ela entrega: N clientes MQTT, um por broker, com
+conexão assíncrona, reconexão da lib com backoff, subscrição da união dos padrões
+das streams refeita a cada reconexão, roteamento tópico → stream com fan-out, e
+encerramento ordenado com o binário rodando sem o MSYS2 no `PATH`. O que ela
+deliberadamente não tem: **nenhum byte em disco** — a mensagem roteada vira uma
+linha de log e é descartada.
+
+**Dívidas registradas, que a Fase 3 herda:**
+
+- O `push` na fila **tem que copiar** o payload (`client.cpp:174-178`).
+- QoS, `clean_session` e sessão persistente entram juntos, e provavelmente por
+  stream (2.4).
+- Não há linha de log durante a janela cega nem durante queda longa — só nas
+  pontas (2.3).
+- SUBACK `0x80` continua **sem teste**: o broker do `tools/` é 1.6.3 e não recusa
+  inscrição por ACL (2.4).

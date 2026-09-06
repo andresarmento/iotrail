@@ -242,3 +242,8 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
 - Acesso dos consumidores: API HTTP + token é a direção, sem decisão fechada.
 - Índice por segmento (esparso?), política de retenção, limite de fila.
 - Revisão do `format_version` depois de rodar com volume real.
+- **QoS, `clean_session` e sessão persistente** — hoje QoS 0 e sessão limpa.
+  Mudam juntos, e só fazem sentido com o writer atrás; a granularidade natural é
+  por stream, que é como o MQTT pede QoS no SUBSCRIBE.
+- **Visibilidade durante falha de conexão:** o log tem uma linha na queda e uma
+  na volta, e nada no meio. Uma supervisão só de log (sem reconectar) resolveria.
