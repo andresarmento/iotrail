@@ -3,7 +3,7 @@
 1. Fundação do projeto — **FECHADA em 2026-09-05** (detalhe em `docs/TODO.md`)
 Estrutura de build, organização de pastas, escolha de bibliotecas base (uma lib MQTT como Eclipse Paho C++ ou Mosquitto, e algo para logging). Definir o padrão C++ (C++17). logging, signal handling (ctrl+c), leitura de arquivo de configuracao (iotrail.conf), config: validação e regras do domínio.
 
-2. Cliente MQTT
+2. Cliente MQTT — **FECHADA em 2026-09-06** (detalhe em `docs/TODO.md`)
 Conectar a um broker, subscrever tópicos configuráveis e receber mensagens de forma estável. Trate reconexão e QoS. Nessa etapa o "sink" pode ser só um print — o objetivo é ter o fluxo de entrada funcionando.
 
 3. Formato de armazenamento (o coração do sistema)

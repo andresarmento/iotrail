@@ -16,14 +16,14 @@ namespace config {
     static constexpr size_t client_id_max_guaranteed = 23;
     static constexpr char data_dir_default[] = "data";
 
-    static bool parse_port(const std::string& text, int& out) {
+    static bool parse_int(const std::string& text, long min, long max, int& out) {
         if (text.empty()) return false;
         char* end = nullptr;
         const long value = std::strtol(text.c_str(), &end, 10);
         // Exigir que o strtol tenha consumido a string inteira rejeita "1883x" e
         // "abc", que std::atoi aceitaria calado como 1883 e 0.
         if (end == nullptr || *end != '\0') return false;
-        if (value < 1 || value > 65535) return false;
+        if (value < min || value > max) return false;
         out = static_cast<int>(value);
         return true;
     }
@@ -116,7 +116,7 @@ namespace config {
     }
 
     static bool load_broker(const ini::section& sec, settings& out) {
-        warn_unknown_keys(sec, {"type", "host", "port", "client_id"});
+        warn_unknown_keys(sec, {"type", "host", "port", "client_id", "keepalive"});
 
         broker br;
         br.name = sec.name;
@@ -138,11 +138,28 @@ namespace config {
         br.host = *host;
 
         if (const std::string* port = sec.find("port")) {
-            if (!parse_port(*port, br.port)) {
+            if (!parse_int(*port, 1, 65535, br.port)) {
                 logging::error("[config] linha {}: broker \"{}\": porta invalida \"{}\" "
                                "(esperado 1-65535)",
                                sec.line, sec.name, *port);
                 return false;
+            }
+        }
+
+        if (const std::string* keepalive = sec.find("keepalive")) {
+            // 0 a 65535 e' a faixa do MQTT 3.1.1 (o campo tem 16 bits).
+            if (!parse_int(*keepalive, 0, 65535, br.keepalive)) {
+                logging::error("[config] linha {}: broker \"{}\": keepalive invalido \"{}\" "
+                               "(esperado 0-65535 segundos)",
+                               sec.line, sec.name, *keepalive);
+                return false;
+            }
+            if (br.keepalive == 0) {
+                // Sem PINGREQ o broker nunca desconecta por inatividade, e do
+                // nosso lado a queda silenciosa de TCP deixa de ser detectada.
+                logging::warn("[config] linha {}: broker \"{}\": keepalive 0 desliga a deteccao "
+                              "de conexao morta",
+                              sec.line, sec.name);
             }
         }
 

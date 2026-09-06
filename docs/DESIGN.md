@@ -108,7 +108,8 @@ sem ambiguidade.
 
 - **O arquivo-fonte é o da raiz do projeto**; o build copia uma versão dele pro
   lado do executável, e é de lá que o programa lê. Editar a cópia em `build/`
-  não adianta.
+  não adianta — e editar a fonte basta: ela é dependência de configure, então o
+  próximo build recopia.
 - **Onde o programa procura:** `-c <arquivo>` na linha de comando vence; sem a
   flag, é o `iotrail.conf` do **diretório do executável**, nunca o diretório de
   trabalho — este muda conforme quem chama (atalho, serviço, tarefa agendada).
@@ -136,8 +137,11 @@ sem ambiguidade.
   o cliente MQTT que monta a partir das streams — uma representação derivada em
   vez de duas que podem divergir.
 - **`[general]` é a única seção sem tipo** — não há o que nomear. Hoje carrega
-  só `data_dir` (onde os segmentos são gravados). Relativo resolve contra o
-  diretório do executável, e a pasta não é criada aqui: isso é do writer.
+  só `data_dir`: onde os segmentos são gravados; relativo resolve contra o
+  diretório do executável, e a pasta não é criada aqui — isso é do writer.
+- **`keepalive` é por broker** (`[broker:*]`, default 30 s), porque é parâmetro
+  da conexão, negociado em cada CONNECT: brokers em links diferentes querem
+  valores diferentes.
 - **Nome de stream é validado no boot**, na config, não no writer: nome vira
   pasta e arquivo, e tem que falhar nomeando a seção culpada, não num `fopen`
   obscuro depois. Só `[A-Za-z0-9_-]+`, mais rejeição dos nomes reservados do DOS
@@ -148,11 +152,35 @@ sem ambiguidade.
 
 ## 6. Ciclo de vida do processo
 
-Sobe na ordem `logging::init()` → `cmdline::parse()` → `signals::init()` → o
-resto (leitura da config na Fase 1, clientes na 2, writers na 3). O logging vem
-primeiro porque erro de qualquer um dos outros precisa de onde sair. A linha de
-comando é conferida antes dos sinais (`main.cpp:18-22`): argumento errado sai com
-código 1, e nesse ponto não há nada montado pra parar de forma ordenada.
+Sobe na ordem `logging::init()` → `cmdline::parse()` → `config::load()` →
+`mqtt::init()` → `signals::init()` → o resto (clientes na Fase 2, writers na 3).
+O `mqtt::init()` fica depois da config porque no Windows ele chama `WSAStartup`,
+e não vale subir a pilha de rede num processo que sai por config inválida. O
+logging vem primeiro porque erro de qualquer um dos outros precisa de onde sair.
+A linha de comando é conferida antes dos sinais (`main.cpp:18-22`): argumento
+errado sai com código 1, e nesse ponto não há nada montado pra parar de forma
+ordenada.
+
+**O roteamento é do cliente, sem estrutura compartilhada.** Cada cliente conhece
+só as streams do seu broker, numa lista imutável desde a construção — com N
+threads da lib rodando callbacks ao mesmo tempo, não há lock no caminho da
+mensagem. O casamento usa `mosquitto_topic_matches_sub` da própria lib, e a
+mensagem vai para **todas** as streams cujo padrão casa.
+
+**As inscrições são refeitas a cada (re)conexão**, de dentro do `on_connect`:
+com `clean_session=true` o broker esquece o que o cliente pediu quando a conexão
+cai. O cliente subscreve a união dos `topics=` das suas streams, com dedup, um
+SUBSCRIBE por padrão — assim o SUBACK identifica qual padrão o broker recusou.
+QoS 0 nesta fase: com QoS 1 a lib confirmaria entrega de mensagem que ainda não
+tem onde ser gravada.
+
+**Reconexão é da lib, não nossa.** Não há supervisão no laço do `main`: a
+libmosquitto retenta sozinha, inclusive a primeira conexão, com backoff de 1 a
+60 s. O que ela **não** faz é perceber a falha na hora — com `connect_async`, uma
+conexão que nunca subiu só é declarada morta quando o keepalive estoura (medido:
+o aviso sai em 30 s com `keepalive=30`, em 10 s com `keepalive=10`). Por isso o
+keepalive é chave de config: ele é o botão que regula a janela cega, e o preço
+de encurtá-la é PINGREQ mais frequente.
 
 **Verbosidade:** `-v` liga `debug`, `-vv` liga `trace`, aplicados logo depois do
 `init()` (`main.cpp:25-29`). Sem flag o nível é `info`. É o único jeito de mudar
@@ -185,9 +213,13 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
 
 - **C++17 + STL.** C++20 avaliado e descartado nesta rodada; o toolchain
   suporta, então subir depois continua possível.
-- **MQTT 3.1.1 via mosquitto.** API C (`libmosquitto`) ou wrapper C++
-  (`libmosquittopp`) fica para a Fase 2. Precedente forte pela API C: o wrapper
-  não expõe o `mosquitto*` interno, o que fecha a porta para MQTT 5.
+- **MQTT 3.1.1 via mosquitto, API C (`libmosquitto` 2.0.22)** — o wrapper C++
+  `libmosquittopp` não expõe o `mosquitto*` interno, o que fecharia a porta para
+  MQTT 5. Vem por pkg-config (não há pacote CMake no MSYS2), e o alvo do
+  pkg-config não tem `IMPORTED_LOCATION`: a DLL vai na lista manual de cópia,
+  junto de `libssl-3` e `libcrypto-3`, que a `libmosquitto.dll` importa mesmo
+  sem TLS — **+6,3 MB no diretório de deploy**, sem alternativa barata no
+  pacote do MSYS2.
 - **Logging: spdlog**, assíncrono (ver §2).
 - **MSYS2 ucrt64**, CMake + Ninja. Multiplataforma é objetivo: o código
   específico de SO fica isolado atrás de `#ifdef` em pontos nomeados (parada
@@ -200,8 +232,8 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
   o `g++` morre com *exit 1 e nenhum diagnóstico*, o que faz o erro parecer do
   código.
 - **Módulos hoje:** `logging`, `signals`, `cmdline`, `paths`, `config/ini`,
-  `config/config`. Layout plano em `src/`, com subpasta quando o assunto tem
-  mais de um par `.h`/`.cpp`.
+  `config/config`, `mqtt/mqtt`, `mqtt/client`. Layout plano em `src/`, com
+  subpasta quando o assunto tem mais de um par `.h`/`.cpp`.
 
 ---
 
@@ -210,3 +242,8 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
 - Acesso dos consumidores: API HTTP + token é a direção, sem decisão fechada.
 - Índice por segmento (esparso?), política de retenção, limite de fila.
 - Revisão do `format_version` depois de rodar com volume real.
+- **QoS, `clean_session` e sessão persistente** — hoje QoS 0 e sessão limpa.
+  Mudam juntos, e só fazem sentido com o writer atrás; a granularidade natural é
+  por stream, que é como o MQTT pede QoS no SUBSCRIBE.
+- **Visibilidade durante falha de conexão:** o log tem uma linha na queda e uma
+  na volta, e nada no meio. Uma supervisão só de log (sem reconectar) resolveria.

@@ -49,11 +49,25 @@ list(APPEND CMAKE_PREFIX_PATH "${IOTRAIL_MSYS2_UCRT64}")
 # esta escolha que sustenta a decisao de runtime C++ dinamico ali em cima.
 find_package(spdlog CONFIG REQUIRED)
 
+# libmosquitto nao tem pacote CMake no MSYS2, so libmosquitto.pc - dai o
+# pkg-config. IMPORTED_TARGET entrega include e link resolvidos, mas o alvo
+# NAO tem IMPORTED_LOCATION (medido): TARGET_RUNTIME_DLLS volta vazio pra ele,
+# e as DLLs vao na lista manual la embaixo.
+#
+# PKG_CONFIG_PATH apontado a partir da variavel de cache, e nao herdado do
+# ambiente: senao o resultado do configure depende do PATH de quem chamou.
+set(ENV{PKG_CONFIG_PATH} "${IOTRAIL_MSYS2_UCRT64}/lib/pkgconfig")
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
+message(STATUS "libmosquitto ${MOSQUITTO_VERSION}")
+
 # Um alvo so, fontes direto no add_executable. Biblioteca + executavel fino so
 # se pagaria pra um teste linkar o codigo, e o framework de teste ficou fora da
 # Fase 1 - reabrir quando entrar.
 add_executable(iotrail
     src/main.cpp
+    src/mqtt/mqtt.cpp
+    src/mqtt/client.cpp
     src/logging.cpp
     src/cmdline.cpp
     src/config/config.cpp
@@ -64,9 +78,9 @@ add_executable(iotrail
 
 # Todo diretorio de fonte entra no include path, entao include e' sempre pelo
 # nome do arquivo ("logging.h"), nunca relativo atravessando pasta.
-target_include_directories(iotrail PRIVATE src src/config)
+target_include_directories(iotrail PRIVATE src src/config src/mqtt)
 
-target_link_libraries(iotrail PRIVATE spdlog::spdlog)
+target_link_libraries(iotrail PRIVATE spdlog::spdlog PkgConfig::MOSQUITTO)
 
 # -Werror de proposito: o projeto comeca com zero aviso, e manter em zero e'
 # mais barato que limpar depois. Se um upgrade do GCC quebrar o build por um
@@ -109,10 +123,26 @@ add_custom_command(TARGET iotrail POST_BUILD
 #    MSYS2 compila spdlog com SPDLOG_FMT_EXTERNAL, mas o fmt entra estatico na
 #    libspdlog (conferido com objdump -p na propria DLL).
 #    Conferir de novo sempre que uma dependencia nova entrar.
+#
+#    A libmosquitto entra aqui, e nao na lista de cima, porque o alvo do
+#    pkg-config nao tem IMPORTED_LOCATION. Junto vem o OpenSSL: a
+#    libmosquitto.dll importa libssl-3 e libcrypto-3 mesmo sem TLS nenhum
+#    (objdump -p na propria DLL), e o TARGET_RUNTIME_DLLS nao varre imports de
+#    DLL - seriam manuais de qualquer jeito. Sao +6,3 MB no diretorio de
+#    deploy, sem escapatoria barata: o pacote do MSYS2 nao tem variante sem
+#    TLS, e linkar estatico so trocaria isso por libcrypto.a de 9,3 MB dentro
+#    do .exe.
+#
+#    ATENCAO ao "3" de libcrypto-3-x64: e' o major do OpenSSL, versao em texto
+#    exatamente do tipo que a lista de cima evita. Se o MSYS2 subir pro 4, o
+#    build passa e o erro aparece so no boot, como DLL faltando.
 set(IOTRAIL_RUNTIME_DLLS
     libstdc++-6.dll
     libgcc_s_seh-1.dll
     libwinpthread-1.dll
+    libmosquitto.dll
+    libssl-3-x64.dll
+    libcrypto-3-x64.dll
 )
 foreach(dll IN LISTS IOTRAIL_RUNTIME_DLLS)
     add_custom_command(TARGET iotrail POST_BUILD
@@ -124,7 +154,12 @@ endforeach()
 # O programa procura o iotrail.conf no proprio diretorio (tarefa 1.4), entao
 # esta copia nao e' conveniencia: sem ela nao ha config ao rodar do build. A
 # fonte e' o iotrail.conf da raiz; a copia e' descartavel.
-add_custom_command(TARGET iotrail POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/iotrail.conf" "$<TARGET_FILE_DIR:iotrail>"
-    VERBATIM)
+#
+# configure_file, e nao POST_BUILD do iotrail: POST_BUILD so roda quando o alvo
+# relinca, entao editar SO o .conf nunca chegava ao build/ - a copia ficava
+# velha em silencio ate alguem mexer num .cpp. Com configure_file o arquivo vira
+# dependencia de configure: mudou, o proximo build reconfigura e recopia.
+#
+# Destino fixo em CMAKE_CURRENT_BINARY_DIR porque o gerador e' single-config
+# (Ninja); $<TARGET_FILE_DIR:iotrail> nao e' aceito no OUTPUT de custom command.
+configure_file(iotrail.conf "${CMAKE_CURRENT_BINARY_DIR}/iotrail.conf" COPYONLY)
