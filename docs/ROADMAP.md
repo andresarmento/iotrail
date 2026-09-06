@@ -1,6 +1,6 @@
 ## Roadmap:
 
-1. Fundação do projeto
+1. Fundação do projeto — **FECHADA em 2026-09-05** (detalhe em `docs/TODO.md`)
 Estrutura de build, organização de pastas, escolha de bibliotecas base (uma lib MQTT como Eclipse Paho C++ ou Mosquitto, e algo para logging). Definir o padrão C++ (C++17). logging, signal handling (ctrl+c), leitura de arquivo de configuracao (iotrail.conf), config: validação e regras do domínio.
 
 2. Cliente MQTT

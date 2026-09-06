@@ -81,8 +81,8 @@ documento. **Migra para `docs/` na Fase 3**, quando o writer for escrito.
 
 Resumo do que está decidido:
 
-- **Uma pasta por stream**, nome repetido no arquivo:
-  `data/vibracao/vibracao-00000.log`. Layout plano foi descartado — a retenção
+- **Uma pasta por stream** dentro do `data_dir` da config (§5), nome repetido no
+  arquivo: `data/vibracao/vibracao-00000.log`. Layout plano foi descartado — a retenção
   apagaria segmentos da stream errada quando um nome fosse prefixo de outro
   (`temperatura` e `temperatura-externa`).
 - **Header de 14 bytes** por segmento: `magic "IOTR"`, `format_version`,
@@ -109,10 +109,35 @@ sem ambiguidade.
 - **O arquivo-fonte é o da raiz do projeto**; o build copia uma versão dele pro
   lado do executável, e é de lá que o programa lê. Editar a cópia em `build/`
   não adianta.
+- **Onde o programa procura:** `-c <arquivo>` na linha de comando vence; sem a
+  flag, é o `iotrail.conf` do **diretório do executável**, nunca o diretório de
+  trabalho — este muda conforme quem chama (atalho, serviço, tarefa agendada).
+  Resolvido em `cmdline::parse()` (`src/cmdline.cpp:19`), sobre o
+  `paths::exe_dir()`.
 - **Config inválida derruba o boot.** Nada de fallback para um destino que
   ninguém escreveu.
 - **O arquivo é lido até o fim**, e todos os problemas vão pro log de uma vez —
-  em vez de um erro por boot.
+  em vez de um erro por boot. Cada linha sai como `arquivo:linha: mensagem`.
+- **Comentário só na abertura da linha** (`#` ou `;`). Não há comentário de fim
+  de linha: `#` é o wildcard multinível do MQTT, e cortar dali pra frente
+  transformaria `topics=umidade/#` em `topics=umidade/` sem avisar.
+- **Duas camadas** (`src/config/`): `ini.*` quebra o arquivo em seções e pares
+  `chave=valor` sem interpretar — inclusive tirando o BOM UTF-8 que o Notepad e
+  o VS Code gravam por padrão; `config.*` aplica as regras acima e devolve
+  `settings` (`config.h:30-36`).
+- **Fatal quando o programa não teria o que fazer, ou faria a coisa errada
+  calado; aviso quando o comportamento resultante ainda é definido.** Fatal:
+  `host` ausente, porta fora de 1–65535, `type != mqtt`, nome repetido, `broker=`
+  citando quem não existe, `topics=` vazio, zero brokers ou zero streams. Aviso:
+  chave desconhecida, `client_id` acima dos 23 caracteres garantidos pelo MQTT
+  3.1.1, `client_id` repetido no mesmo `host:porta`, broker que nenhuma stream
+  usa.
+- **A config reflete o arquivo; não deriva.** A união dos `topics=` por broker é
+  o cliente MQTT que monta a partir das streams — uma representação derivada em
+  vez de duas que podem divergir.
+- **`[general]` é a única seção sem tipo** — não há o que nomear. Hoje carrega
+  só `data_dir` (onde os segmentos são gravados). Relativo resolve contra o
+  diretório do executável, e a pasta não é criada aqui: isso é do writer.
 - **Nome de stream é validado no boot**, na config, não no writer: nome vira
   pasta e arquivo, e tem que falhar nomeando a seção culpada, não num `fopen`
   obscuro depois. Só `[A-Za-z0-9_-]+`, mais rejeição dos nomes reservados do DOS
@@ -123,9 +148,15 @@ sem ambiguidade.
 
 ## 6. Ciclo de vida do processo
 
-Sobe na ordem `logging::init()` → `signals::init()` → o resto (config na Fase 1,
-clientes na 2, writers na 3). O logging vem primeiro porque erro de qualquer um
-dos outros precisa de onde sair.
+Sobe na ordem `logging::init()` → `cmdline::parse()` → `signals::init()` → o
+resto (leitura da config na Fase 1, clientes na 2, writers na 3). O logging vem
+primeiro porque erro de qualquer um dos outros precisa de onde sair. A linha de
+comando é conferida antes dos sinais (`main.cpp:18-22`): argumento errado sai com
+código 1, e nesse ponto não há nada montado pra parar de forma ordenada.
+
+**Verbosidade:** `-v` liga `debug`, `-vv` liga `trace`, aplicados logo depois do
+`init()` (`main.cpp:25-29`). Sem flag o nível é `info`. É o único jeito de mudar
+o nível — não há variável de ambiente nem chave de config.
 
 **Todo pedido de parada passa por um ponto só** — `signals::request_stop()`, lido
 por `signals::stop_requested()`. Entram por ali o `SIGINT`/`SIGTERM`, os eventos
@@ -161,6 +192,16 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
 - **MSYS2 ucrt64**, CMake + Ninja. Multiplataforma é objetivo: o código
   específico de SO fica isolado atrás de `#ifdef` em pontos nomeados (parada
   ordenada, localização do executável, `fsync`, `truncate`), não espalhado.
+- **Um alvo só**, `-Wall -Wextra -Wpedantic -Werror` no nosso código, build type
+  default `RelWithDebInfo`. As DLLs de terceiros e o `iotrail.conf` são copiados
+  para junto do `.exe` a cada build — o programa roda de dentro do `build/` sem
+  o MSYS2 no `PATH`, e isso é testado no fechamento de cada fase.
+- **Build e execução pelo PowerShell.** Pelo shell POSIX sandboxed desta máquina
+  o `g++` morre com *exit 1 e nenhum diagnóstico*, o que faz o erro parecer do
+  código.
+- **Módulos hoje:** `logging`, `signals`, `cmdline`, `paths`, `config/ini`,
+  `config/config`. Layout plano em `src/`, com subpasta quando o assunto tem
+  mais de um par `.h`/`.cpp`.
 
 ---
 

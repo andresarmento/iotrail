@@ -17,4 +17,9 @@ namespace logging {
     using spdlog::warn;
     using spdlog::error;
     using spdlog::critical;
+
+    // logging::set_level(logging::level::debug) - vale pros loggers ja
+    // registrados e pros que vierem (arquivo rotativo, Fase 9).
+    namespace level = spdlog::level;
+    using spdlog::set_level;
 }
