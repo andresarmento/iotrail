@@ -5,14 +5,22 @@
  */
 
 #include "logging.h"
+#include "paths.h"
 #include "signals.h"
 #include <chrono>
+#include <filesystem>
 #include <thread>
 
-int main() {
+int main(int argc, char* argv[]) {
     logging::init();
-    signals::init();
 
+    const std::filesystem::path config_path = paths::config_from_args(argc, argv);
+    if (config_path.empty()) {
+        logging::shutdown();
+        return 1;
+    }
+    logging::info("config: {}", config_path.string());
+    signals::init();
     logging::info("IoTrail subiu, Ctrl+C para encerrar");
 
     while (!signals::stop_requested()) {

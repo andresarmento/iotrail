@@ -7,7 +7,7 @@ escrever a tarefa seguinte na mesma leva.
 Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocínio
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
-**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1, 1.2 e 1.3.
+**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1, 1.2, 1.3 e 1.4.
 
 ---
 
@@ -212,7 +212,7 @@ code `0xC000013A`, antes de o `main` sequer acordar dos 200 ms: não havia parad
 ordenada nenhuma. Em `CTRL_C`/`CTRL_BREAK` o `TRUE` continua bastando.
 
 Por isso o handler **bloqueia** nesses três eventos até `shutdown_done()`
-(`signals.cpp:81`, chamado em `main.cpp:24` como última linha do `main`), com
+(`signals.cpp:81`, chamado em `main.cpp:37` como última linha do `main`), com
 teto de **3 s** (`signals.cpp:24`). O teto não é gosto: **o prazo real desta
 máquina foi medido em 5013 ms** (probe com handler que nunca retorna), e o valor
 sai do registro do Windows, mudando de máquina pra máquina. 3 s deixa margem —
@@ -237,14 +237,63 @@ novo o evento não chega, e parece bug do programa.
 do SO (~5 s aqui) menos os 200 ms do polling. Se não couber: limitar a drenagem e
 aceitar perda, ou tentar até o fim e arriscar ser morto no meio.
 
-### 1.4 — Localização de arquivos
-Descobrir o diretório do executável, pra achar o `iotrail.conf`.
+### 1.4 — Localização de arquivos — FECHADO (2026-09-05)
 
-Decisões a tomar:
-- O `.conf` mora ao lado do `.exe`, no diretório de trabalho, ou vem por
-  argumento de linha de comando?
-- Isolar o código específico de SO agora (`GetModuleFileNameW` no Windows,
-  `/proc/self/exe` no Linux) ou deixar pra camada de plataforma da Fase 3?
+`src/paths.h`/`.cpp`: descobrir o diretório do executável pra achar o
+`iotrail.conf`, mais a linha de comando do `main`.
+
+**Decisões tomadas:**
+
+- **Diretório do executável, não o de trabalho** (`paths.cpp:109-116`). O
+  diretório de trabalho é de quem chama — atalho, serviço, tarefa agendada — e
+  não tem relação com onde o programa foi instalado. O contrato já estava
+  escrito no cabeçalho do `iotrail.conf:6-9` e na cópia do build
+  (`CMakeLists.txt:121-127`); agora o código cumpre.
+- **`-c <arquivo>` sobrepõe** (`paths.cpp:89-98`). Uma flag, não argumento
+  posicional: posicional envelhece mal quando entrar o segundo (`--data-dir`).
+  Vale pra rodar duas instâncias do mesmo binário com configs diferentes, caso
+  que a própria config já prevê (`iotrail.conf:16-19`, client_id coincidente).
+- **Argumento desconhecido ou `-c` sem valor derrubam o boot** com código 1 e a
+  linha de uso. Ignorar argumento errado faz o programa subir com config
+  diferente da que a pessoa pediu, e ela só descobre pelo dado que não chegou.
+- **Resolvido antes de `signals::init()`** (`main.cpp:20-24`). Nesse ponto não
+  há fila nem writer, então sair é só `logging::shutdown()` e `return 1` — sem
+  passar pelo `shutdown_done()`, que ninguém está esperando ainda.
+- **Só resolve o caminho, não abre nem confere existência.** Quem abre é a 1.5,
+  e é lá que o erro "não achei em X" tem o `errno` pra dizer *por quê* (não
+  existe, sem permissão, é um diretório). Conferir aqui daria duas mensagens
+  pro mesmo problema e uma janela entre o teste e o `fopen`.
+- **`std::filesystem::path` como moeda, não `std::string`** (`paths.h:12-19`).
+  No Windows o `path` guarda `wchar_t` nativo, então acento no caminho
+  atravessa sem passar pela codepage; e o `data/<stream>/` da Fase 3 vai
+  precisar da mesma coisa. C++17 já traz, sem `-lstdc++fs` no GCC atual.
+- **`#ifdef _WIN32` inline, sem `platform/`** — igual à 1.3. A camada de
+  plataforma continua Fase 3, junto do `fsync`/`truncate`. O ramo POSIX
+  (`/proc/self/exe`) está escrito mas **não testado**; existe pelo porte.
+
+**O detalhe que dá trabalho:** `GetModuleFileNameW` **não avisa por retorno**
+quando o buffer é pequeno — devolve o tamanho do próprio buffer e o "não coube"
+fica só no `GetLastError`. Daí o laço comparar `n` com o tamanho e dobrar o
+buffer (`paths.cpp:41-58`), com teto de 32768 (`paths.cpp:29`). `readlink` tem o
+mesmo formato de armadilha, mais o fato de não terminar em `\0`. E é `W` de
+propósito: a versão `A` converte pra codepage ANSI e caminho acentuado vira `?`.
+
+**Limite conhecido:** `argv` é narrow e no Windows vem na codepage ANSI, então
+caminho acentuado passado em `-c` pode não sobreviver — o default (diretório do
+exe) não tem esse problema. A saída, se doer, é `CommandLineToArgvW`
+(`paths.cpp:94-97`).
+
+**Validado** (build limpo com `-Werror`, exe rodado de `%TEMP%`):
+
+| caso | resultado |
+|---|---|
+| sem argumento, cwd em outra pasta | `config: <build>\iotrail.conf` |
+| `-c <caminho absoluto>` | usa o caminho dado |
+| `-c` sem valor / `-x` / `--nope` | erro + linha de uso, exit 1 |
+| exe copiado pra pasta com acentos | caminho correto, sem `?` |
+
+O log do caminho sai em UTF-8 (`path::string()`); console em codepage 850/1252
+mostra acento embaralhado — é display do terminal, o caminho aberto é o certo.
 
 ### 1.5 — Config: leitura do arquivo
 Ler o `iotrail.conf` e transformá-lo em estrutura de dados, sem interpretar.
