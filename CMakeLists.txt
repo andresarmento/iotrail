@@ -55,13 +55,14 @@ find_package(spdlog CONFIG REQUIRED)
 add_executable(iotrail
     src/main.cpp
     src/logging.cpp
+    src/config/ini.cpp
     src/paths.cpp
     src/signals.cpp
 )
 
 # Todo diretorio de fonte entra no include path, entao include e' sempre pelo
 # nome do arquivo ("logging.h"), nunca relativo atravessando pasta.
-target_include_directories(iotrail PRIVATE src)
+target_include_directories(iotrail PRIVATE src src/config)
 
 target_link_libraries(iotrail PRIVATE spdlog::spdlog)
 

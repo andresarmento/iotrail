@@ -116,7 +116,13 @@ sem ambiguidade.
 - **Config inválida derruba o boot.** Nada de fallback para um destino que
   ninguém escreveu.
 - **O arquivo é lido até o fim**, e todos os problemas vão pro log de uma vez —
-  em vez de um erro por boot.
+  em vez de um erro por boot. Cada linha sai como `arquivo:linha: mensagem`.
+- **Comentário só na abertura da linha** (`#` ou `;`). Não há comentário de fim
+  de linha: `#` é o wildcard multinível do MQTT, e cortar dali pra frente
+  transformaria `topics=umidade/#` em `topics=umidade/` sem avisar.
+- **Duas camadas** (`src/config/`): `ini.*` quebra o arquivo em seções e pares
+  `chave=valor` sem interpretar — inclusive tirando o BOM UTF-8 que o Notepad e
+  o VS Code gravam por padrão; `config.*` aplica as regras acima.
 - **Nome de stream é validado no boot**, na config, não no writer: nome vira
   pasta e arquivo, e tem que falhar nomeando a seção culpada, não num `fopen`
   obscuro depois. Só `[A-Za-z0-9_-]+`, mais rejeição dos nomes reservados do DOS

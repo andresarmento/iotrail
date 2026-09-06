@@ -7,7 +7,7 @@ escrever a tarefa seguinte na mesma leva.
 Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocínio
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
-**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1, 1.2, 1.3 e 1.4.
+**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1 a 1.5.
 
 ---
 
@@ -118,8 +118,12 @@ faltava era como ela entra no código.
   roda na thread do pool, não custa latência a quem chamou, e garante que a
   última linha antes de um crash saiu.
 - **Nível `info` fixo + `SPDLOG_LEVEL` do ambiente**
-  (`spdlog::cfg::load_env_levels()`, `logging.cpp:28`). `set SPDLOG_LEVEL=debug`
-  liga debug/trace sem recompilar. Chave própria de config ficou fora de
+  (`spdlog::cfg::load_env_levels()`, `logging.cpp:28`).
+  **No PowerShell é `$env:SPDLOG_LEVEL="debug"`** (ou `"trace"`), não
+  `set SPDLOG_LEVEL=debug` — este é sintaxe do `cmd`, e no PowerShell o `set` é
+  apelido de `Set-Variable`: cria variável de sessão, o ambiente fica vazio e o
+  programa continua em `info` sem nenhum aviso. Vale só no terminal onde foi
+  setada. Liga debug/trace sem recompilar. Chave própria de config ficou fora de
   propósito: o logger sobe **antes** da config ser lida (senão erro de config não
   teria onde sair), então uma chave exigiria um `set_level()` posterior de
   qualquer forma — decidir isso é assunto de 1.6, não daqui. Verificado:
@@ -295,24 +299,73 @@ exe) não tem esse problema. A saída, se doer, é `CommandLineToArgvW`
 O log do caminho sai em UTF-8 (`path::string()`); console em codepage 850/1252
 mostra acento embaralhado — é display do terminal, o caminho aberto é o certo.
 
-### 1.5 — Config: leitura do arquivo
-Ler o `iotrail.conf` e transformá-lo em estrutura de dados, sem interpretar.
+### 1.5 — Config: leitura do arquivo — FECHADO (2026-09-05)
 
-Decisões a tomar:
-- Parser genérico separado da interpretação (custa um par de arquivos a mais) ou
-  um parser que já conhece broker e stream?
-- Erro de sintaxe: para no primeiro ou lê o arquivo até o fim e reporta tudo de
-  uma vez? (O segundo evita "um erro por boot".)
-- Erros logados de dentro do parser ou devolvidos ao chamador? Logar por dentro
-  é mais simples agora; devolver é o que torna a config testável depois.
-- Comportamentos a cobrir: comentários `#`/`;`, trim, `=` obrigatório, cabeçalho
-  sem `]`, seção sem nome, par antes de qualquer seção, chave repetida.
-- **Dois achados a não perder** da rodada anterior: BOM UTF-8 no início do arquivo
-  faz a primeira seção virar lixo; e `std::atoi` na porta aceita `"1883x"` como
-  `1883` e `"abc"` como `0`, em silêncio.
+`src/config/ini.h`/`.cpp`: quebra o arquivo em seções e pares `chave=valor`, sem
+interpretar nada. O desenho reaproveita o parser da rodada anterior
+(`knowledge_base/iotrail_refactory/src/config/ini.cpp`).
+
+**Decisões tomadas:**
+
+- **Parser genérico, separado do domínio** (`ini.h:27-35`). O cabeçalho vira
+  `type`/`name` (`[broker:casa]` → `"broker"`/`"casa"`), e *exigir* o tipo, ou
+  saber que broker precisa de `host`, é regra da 1.6. Isso já são dois pares
+  `.h`/`.cpp` no mesmo assunto (`ini.*` agora, `config.*` na 1.6), então
+  disparou a regra de layout da 1.1 e nasceu a subpasta `src/config/` — a
+  primeira do projeto. Ela entra no include path (`CMakeLists.txt:65`), então o
+  include continua sendo `"ini.h"`, sem caminho relativo.
+- **Erros logados de dentro do parser**, `std::optional` de volta —
+  **eu tinha recomendado o contrário** (devolver um vetor de erros pro chamador
+  logar) e a recomendação não se sustentou: a 1.6 não faria nada com esses erros
+  além de logar, porque config inválida derruba o boot de qualquer jeito
+  (`DESIGN.md:116`); "reportar tudo de uma vez" já sai de graça logando por
+  dentro; e testar continua possível pendurando um sink no spdlog. Reabrir se
+  aparecer `--check-config` ou reload a quente (Fase 9), que vão querer
+  severidade diferente da fixada aqui.
+- **Lê até o fim e conta** (`ini.cpp:121-124`): cada problema vira uma linha
+  `arquivo:linha: mensagem`, e no fim uma linha com o total. Sem isso, corrigir
+  uma config ruim custa um boot por erro.
+- **`parse(istream)` + `parse_file(path)`** (`ini.h:43-44`). O miolo não conhece
+  arquivo: com o framework de teste, os casos ruins entram por `istringstream`,
+  sem espalhar fixture pelo disco. O `parse_file` passa o `fs::path` direto pro
+  `ifstream` (`ini.cpp:130`), mantendo o caminho nativo que a 1.4 preservou.
+- **Sem comentário de fim de linha** (`ini.cpp:47-51`) — só `#`/`;` abrindo a
+  linha. Não é preguiça: `#` é o wildcard multinível do MQTT, e cortar dali pra
+  frente transformaria `topics=umidade/#` (`iotrail.conf:57`) em
+  `topics=umidade/`. A stream subscreveria outro tópico, calada. O parser
+  anterior se comportava assim por omissão; aqui é decisão.
+- **Valor vazio (`host=`) passa** (`ini.cpp:93-95`): a chave foi escrita, existe.
+  Se vazio é aceitável depende da chave — domínio, 1.6. Mesma lógica pro `atoi`
+  da porta: aqui tudo é string, a conversão com `std::from_chars` (que rejeita
+  `"1883x"`, ao contrário do `atoi`) é 1.6.
+- **Falha ao abrir diz o motivo** (`ini.cpp:131-139`) — a dívida que a 1.4
+  deixou. `errno` zerado antes do `ifstream` e `strerror` depois: "No such file
+  or directory" e "Permission denied" (o que o Windows devolve quando o caminho
+  é um diretório) pedem correções diferentes.
+- **Tipos em `snake_case`** (`entry`, `section`, `sections`) — o código anterior
+  usava `Entry`/`Section`. Convenção nova, fixada aqui: segue a STL e o resto do
+  projeto, que já é `snake_case` desde a 1.3.
+
+**Fora do escopo, de propósito:** nome de seção repetido (`[broker:casa1]` duas
+vezes) é domínio, 1.6; aspas em valor, continuação de linha e `include` não têm
+caso de uso.
+
+**Validado** (`SPDLOG_LEVEL=trace`, arquivos de teste no scratchpad):
+
+| caso | resultado |
+|---|---|
+| `iotrail.conf` real | 5 seções, `topics=umidade/#` chega inteiro |
+| BOM UTF-8 + CRLF | seção 1 encontrada, valor sem `\r` |
+| 7 erros num arquivo só | 7 linhas + total, exit 1, nenhum erro engolido |
+| `#` no meio do valor | preservado, não vira comentário |
+| arquivo inexistente | `No such file or directory` |
+| `-c <um diretório>` | `Permission denied` |
+
+O `main` passou a listar as seções em `debug` e os pares em `trace`
+(`main.cpp:33-39`) — é como se confere o que o parser leu sem depurador.
 
 ### 1.6 — Config: validação e regras do domínio
-Dar significado ao que 1.6 leu: o que é um broker válido, o que é uma stream válida.
+Dar significado ao que a 1.5 leu: o que é um broker válido, o que é uma stream válida.
 
 Decisões a tomar:
 - Config inválida derruba o boot ou cai em default? (O projeto antigo tinha
