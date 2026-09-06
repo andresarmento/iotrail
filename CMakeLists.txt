@@ -67,6 +67,7 @@ message(STATUS "libmosquitto ${MOSQUITTO_VERSION}")
 add_executable(iotrail
     src/main.cpp
     src/mqtt/mqtt.cpp
+    src/mqtt/client.cpp
     src/logging.cpp
     src/cmdline.cpp
     src/config/config.cpp

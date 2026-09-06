@@ -8,7 +8,7 @@ Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocíni
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
-mesma data; 2.1 fechada em 2026-09-06. Próxima tarefa: 2.2.
+mesma data; 2.1 e 2.2 fechadas em 2026-09-06. Próxima tarefa: 2.3.
 
 ---
 
@@ -574,9 +574,12 @@ linhas). São medições, não preferências:
   É isso que obriga a supervisão da 2.3.
 - **`stop()` tem que distinguir disconnect de force.** `loop_stop(force=false)`
   bloqueia até a thread da lib terminar, e ela só termina se o disconnect tiver
-  funcionado; quando o cliente nunca conectou, o disconnect devolve
-  `MOSQ_ERR_NO_CONN` sem fazer nada. Medido: **~11 s de atraso** no encerramento
-  com broker inalcançável.
+  funcionado. Medido lá: **~11 s de atraso** no encerramento com broker
+  inalcançável. **A explicação que vinha junto — "quando o cliente nunca
+  conectou, o disconnect devolve `MOSQ_ERR_NO_CONN`" — foi REFUTADA na 2.2**
+  (libmosquitto 2.0.22 devolve `SUCCESS`), e com ela a regra de decidir o
+  `force` pelo retorno do disconnect. O sintoma é real, a causa era outra: ver o
+  registro da 2.2.
 - **`mosquitto_strerror` devolve "Unknown error" para `MOSQ_ERR_ERRNO`**, que é o
   código de quase toda falha de rede. Sem o `errno` do sistema junto, "recusado",
   "host inalcançável" e "DNS falhou" viram a mesma mensagem inútil. O `errno` é
@@ -672,19 +675,82 @@ cópia de DLL no `CMakeLists.txt`. **libmosquitto 2.0.22**, do pacman.
 | rodar com `PATH` **sem** MSYS2 | sobe e loga `libmosquitto 2.0.22` |
 | config inválida | sai antes do `lib_init` — nenhum `WSAStartup` |
 
-### 2.2 — Um cliente por broker: conectar
-`connect_async` + `loop_start`, callbacks e mensagens de erro.
+### 2.2 — Um cliente por broker: conectar — FECHADO (2026-09-06)
 
-Decisões a tomar:
-- `keepalive`: valor, e se vira chave de `[broker:*]` ou fica constante.
-- `clean_session=true` nesta fase (sem QoS > 0 não há sessão a guardar).
-- **Os callbacks rodam na thread da lib, uma por cliente** — com N brokers, N
-  callbacks simultâneos. Confirmar que nada é compartilhado entre eles.
-- `on_log` como único canal que reporta falha de TCP quando se usa
-  `connect_async` (nem `on_connect` nem `on_disconnect` são chamados): quanto
-  dele vai pro nosso log, e em que nível.
-- Nome e forma do módulo (`src/mqtt/`?), já que serão dois pares `.h`/`.cpp` ou
-  mais.
+`src/mqtt/client.h`/`.cpp`: `mqtt::client`, um por broker, com `start()` e
+`stop()`. Subscrição (2.4) e roteamento (2.5) ainda não entram — este cliente
+conecta e fica conectado.
+
+**Decisões tomadas:**
+
+- **`class client` não-copiável, guardada em `vector<unique_ptr>`**
+  (`main.cpp:66-68`). O `this` é registrado como userdata da lib e os callbacks
+  voltam por ele: se o vector realocasse, o endereço mudaria debaixo da thread
+  de rede. O construtor recebe **cópia** do `config::broker` — host, porta e
+  client_id ficam autossuficientes.
+- **`keepalive` constante de 60 s** (`client.cpp:13`), não chave de config.
+  Vira chave quando aparecer rede que precise (NAT agressivo derrubando conexão
+  ociosa); adiar custa mexer em três lugares depois — lista de chaves conhecidas
+  do `config.cpp:119`, `iotrail.conf` e registro.
+- **`clean_session=true`** (`client.cpp:41`), amarrado ao QoS 0 da 2.4: sem QoS
+  > 0 não há sessão a guardar. Os dois mudam juntos se um dia mudarem.
+- **Backoff da lib 1 s → 60 s** (`client.cpp:14-15,55`), igual ao que a
+  supervisão da 2.3 vai usar.
+- **Falha no `start()` derruba o boot** (`main.cpp:69-73`): `mosquitto_new` ou
+  `loop_start` falhando é falta de recurso local, não broker fora do ar — este
+  nem aparece aqui, porque o `connect_async` devolve sucesso com o host morto.
+- **`on_log` mapeado por nível** (`client.cpp:141-154`): `MOSQ_LOG_ERR` e
+  `WARNING` viram nosso `warn`; `MOSQ_LOG_DEBUG` vira **`trace`**, não `debug`,
+  porque a lib loga cada PINGREQ/PINGRESP e a cada 60 s isso poluiria o `-v` de
+  quem está depurando outra coisa.
+- **Prefixo `[mqtt/<broker>]`** em toda linha, como o `[config]` da Fase 1. Com
+  N clientes em N threads, sem o nome do broker o log vira adivinhação.
+- **`error_text()`** (`client.cpp:21-27`): `mosquitto_strerror` mais o `errno`
+  quando o código é `MOSQ_ERR_ERRNO`, senão "recusado", "host inalcançável" e
+  "DNS falhou" saem com a mesma mensagem inútil.
+- **O `stop()` foi puxado da 2.6 pra cá**, decidido na conversa: sem ele a 2.2
+  não é validável — o processo não sairia, e o travamento apareceria como
+  origem misteriosa. A 2.6 fica com a ordem do encerramento com N clientes e o
+  orçamento do handler.
+
+**O achado desta tarefa — o registro herdado estava errado, e do jeito pior:**
+
+A rodada anterior mandava decidir o `force` do `loop_stop` **pelo retorno do
+`mosquitto_disconnect`**, com a justificativa de que um cliente que nunca
+conectou receberia `MOSQ_ERR_NO_CONN`. **Medido na 2.0.22 com `connect_async`:
+o disconnect devolve `MOSQ_ERR_SUCCESS` mesmo sem nunca ter havido conexão.**
+Seguindo o retorno, o `loop_stop` entrava sem `force` e ficava preso no join de
+uma thread parada dentro do `connect()` do SO — com host que engole SYN
+(192.0.2.1), o Ctrl+C **não encerrava em 5 s** e o fechar-janela morria no teto
+de 3 s do handler da 1.3. Com `force`, **112 ms**.
+
+Então quem decide é a **nossa** flag, e é o "conectado **agora**"
+(`client.cpp:100`), não o "já conectou alguma vez": um cliente que conectou e
+está no meio de uma retentativa tem a thread no mesmo `connect()` bloqueante.
+Corrida aceita e anotada: se a conexão subir entre o `load()` e o `loop_stop`,
+o broker vê um TCP fechado na marra em vez de um DISCONNECT — irrelevante num
+processo que está saindo. E `force` é `pthread_cancel`: só vale porque isto roda
+na saída; restart em execução (se algum dia existir) precisa de outra saída.
+
+**O outro achado: falha de conexão inicial é 100% silenciosa.** Com a porta
+fechada em `127.0.0.1:18999` e `-vv`, o log tem só a linha `sending CONNECT` da
+própria lib — não há `on_connect`, não há `on_disconnect`, e o `on_log` não diz
+nada. Ou seja: **host errado na config é hoje indistinguível de tudo certo**,
+até alguém reparar que a linha "conectado em ..." nunca veio. É o argumento
+empírico pro `tick()` da 2.3, que passa a ser mais do que "reconectar": é o que
+torna a falha visível.
+
+**Validado** (broker local `tools/mosquitto.exe` 1.6.3, e `192.0.2.1` como host
+que engole SYN):
+
+| caso | resultado |
+|---|---|
+| broker no ar | `conectado em 127.0.0.1:1883`; broker vê `iotrail-local (p2, c1, k60)` |
+| encerramento com conexão | DISCONNECT limpo no log do broker; Ctrl+C 113 ms, fechar janela 63 ms |
+| broker inalcançável | boot não trava; Ctrl+C 112 ms, fechar janela 87 ms |
+| dois brokers, um morto | os dois clientes sobem, o vivo conecta, encerra em 131 ms |
+| porta fechada | conexão recusada **sem nenhuma linha de erro** (ver acima) |
+| build | zero aviso com `-Werror` |
 
 ### 2.3 — Reconexão e supervisão
 O `tick()` que cobre o buraco da primeira conexão.

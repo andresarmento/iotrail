@@ -207,8 +207,8 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
   o `g++` morre com *exit 1 e nenhum diagnóstico*, o que faz o erro parecer do
   código.
 - **Módulos hoje:** `logging`, `signals`, `cmdline`, `paths`, `config/ini`,
-  `config/config`, `mqtt/mqtt`. Layout plano em `src/`, com subpasta quando o
-  assunto tem mais de um par `.h`/`.cpp`.
+  `config/config`, `mqtt/mqtt`, `mqtt/client`. Layout plano em `src/`, com
+  subpasta quando o assunto tem mais de um par `.h`/`.cpp`.
 
 ---
 
