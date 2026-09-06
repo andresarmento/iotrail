@@ -7,7 +7,8 @@ escrever a tarefa seguinte na mesma leva.
 Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocínio
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
-**Estado:** Fase 1 desmembrada em 2026-09-05. Fechadas 1.1 a 1.5.
+**Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Próxima: Fase 2,
+cliente MQTT.
 
 ---
 
@@ -98,7 +99,7 @@ faltava era como ela entra no código.
 
 **Decisões tomadas:**
 
-- **Nem `spdlog::` direto nem wrapper: `using`-declarations** (`logging.h:25-30`).
+- **Nem `spdlog::` direto nem wrapper: `using`-declarations** (`logging.h:14-19`).
   `logging.h` reexporta `trace`/`debug`/`info`/`warn`/`error`/`critical` sob o
   namespace `logging`. Não é wrapper — sem indireção, sem sobrecarga, API `{}`
   idêntica — mas todo ponto de chamada escreve `logging::info`. Se a lib trocar,
@@ -106,7 +107,7 @@ faltava era como ela entra no código.
 - **Só console** (`stdout_color_sink_mt`). Arquivo rotativo continua Fase 9.
 - **Logger assíncrono**, thread pool própria: fila de 8192, **1 worker** — mais
   de um embaralharia a ordem das linhas, que é metade do valor de um log.
-- **Overflow `overrun_oldest`, não `block`** (`logging.cpp:19-21`) — **diverge da
+- **Overflow `overrun_oldest`, não `block`** (`logging.cpp:18-20`) — **diverge da
   rodada anterior, que usava `block`.** Com `block`, fila cheia devolve o console
   ao caminho de recebimento/gravação, que é exatamente o acoplamento que o logger
   assíncrono existe pra cortar. E no Windows isso não é hipotético: clicar dentro
@@ -117,7 +118,7 @@ faltava era como ela entra no código.
 - **Flush por mensagem** (`flush_on(trace)`). Com o logger assíncrono o flush
   roda na thread do pool, não custa latência a quem chamou, e garante que a
   última linha antes de um crash saiu.
-- **Nível `info` fixo** (`logging.cpp:24`). Quem sobe pra debug/trace é o
+- **Nível `info` fixo** (`logging.cpp:23`). Quem sobe pra debug/trace é o
   `-v`/`-vv` da linha de comando (adendo da 1.4). Chave própria de config ficou
   fora de propósito: o logger sobe **antes** da config ser lida (senão erro de
   config não teria onde sair), então uma chave exigiria um `set_level()`
@@ -187,7 +188,7 @@ do CMake, não há como parametrizar.
 - **`std::atomic<bool>`, não `volatile sig_atomic_t`** (`signals.cpp:20`). No
   Windows os dois handlers rodam em thread criada pelo SO: é comunicação entre
   threads, não interrupção de sinal, e `volatile` não garante nada aí.
-- **Espera do `main` em polling de 200 ms** (`main.cpp:19`), não
+- **Espera do `main` em polling de 200 ms** (`main.cpp:57-59`), não
   `condition_variable`. O `main` não tem trabalho pendurado na espera, e
   notificar uma cv de dentro do handler de `SIGINT` não é async-signal-safe — se
   um dia precisar acordar na hora, o caminho é um evento do SO, não cv. O custo
@@ -216,7 +217,7 @@ code `0xC000013A`, antes de o `main` sequer acordar dos 200 ms: não havia parad
 ordenada nenhuma. Em `CTRL_C`/`CTRL_BREAK` o `TRUE` continua bastando.
 
 Por isso o handler **bloqueia** nesses três eventos até `shutdown_done()`
-(`signals.cpp:81`, chamado em `main.cpp:37` como última linha do `main`), com
+(`signals.cpp:81`, chamado em `main.cpp:63` como última linha do `main`), com
 teto de **3 s** (`signals.cpp:24`). O teto não é gosto: **o prazo real desta
 máquina foi medido em 5013 ms** (probe com handler que nunca retorna), e o valor
 sai do registro do Windows, mudando de máquina pra máquina. 3 s deixa margem —
@@ -262,7 +263,7 @@ registro já apontam pra lá.
 - **Argumento desconhecido ou `-c` sem valor derrubam o boot** com código 1 e a
   linha de uso. Ignorar argumento errado faz o programa subir com config
   diferente da que a pessoa pediu, e ela só descobre pelo dado que não chegou.
-- **Resolvido antes de `signals::init()`** (`main.cpp:19-23`). Nesse ponto não
+- **Resolvido antes de `signals::init()`** (`main.cpp:18-22`). Nesse ponto não
   há fila nem writer, então sair é só `logging::shutdown()` e `return 1` — sem
   passar pelo `shutdown_done()`, que ninguém está esperando ainda.
 - **Só resolve o caminho, não abre nem confere existência.** Quem abre é a 1.5,
@@ -309,7 +310,7 @@ também quando o programa sobe sem ambiente nenhum (botão Run do VS Code).
 - **`-v` = debug, `-vv` = trace** (`cmdline.cpp:33-36`). Contados: `-v -v` soma o
   mesmo que `-vv`, e `-vvv` satura em trace (`max_verbose`, `cmdline.cpp:12`) em vez
   de virar erro — recusar seria explicar um limite que não interessa a ninguém.
-- **Sem flag, vale o `info` que o `logging::init()` montou** (`main.cpp:26-30`).
+- **Sem flag, vale o `info` que o `logging::init()` montou** (`main.cpp:25-29`).
   A flag é a única forma de mudar o nível: a variável de ambiente que dividia
   esse papel foi removida junto (ver 1.2). Um jeito só, sem regra de
   precedência pra lembrar.
@@ -349,7 +350,7 @@ interpretar nada. O desenho reaproveita o parser da rodada anterior
 
 **Decisões tomadas:**
 
-- **Parser genérico, separado do domínio** (`ini.h:27-35`). O cabeçalho vira
+- **Parser genérico, separado do domínio** (`ini.h:24-32`). O cabeçalho vira
   `type`/`name` (`[broker:casa]` → `"broker"`/`"casa"`), e *exigir* o tipo, ou
   saber que broker precisa de `host`, é regra da 1.6. Isso já são dois pares
   `.h`/`.cpp` no mesmo assunto (`ini.*` agora, `config.*` na 1.6), então
@@ -364,23 +365,23 @@ interpretar nada. O desenho reaproveita o parser da rodada anterior
   dentro; e testar continua possível pendurando um sink no spdlog. Reabrir se
   aparecer `--check-config` ou reload a quente (Fase 9), que vão querer
   severidade diferente da fixada aqui.
-- **Lê até o fim e conta** (`ini.cpp:121-124`): cada problema vira uma linha
+- **Lê até o fim e conta** (`ini.cpp:111-114`): cada problema vira uma linha
   `arquivo:linha: mensagem`, e no fim uma linha com o total. Sem isso, corrigir
   uma config ruim custa um boot por erro.
-- **`parse(istream)` + `parse_file(path)`** (`ini.h:43-44`). O miolo não conhece
+- **`parse(istream)` + `parse_file(path)`** (`ini.h:35-36`). O miolo não conhece
   arquivo: com o framework de teste, os casos ruins entram por `istringstream`,
   sem espalhar fixture pelo disco. O `parse_file` passa o `fs::path` direto pro
-  `ifstream` (`ini.cpp:130`), mantendo o caminho nativo que a 1.4 preservou.
-- **Sem comentário de fim de linha** (`ini.cpp:47-51`) — só `#`/`;` abrindo a
+  `ifstream` (`ini.cpp:118`), mantendo o caminho nativo que a 1.4 preservou.
+- **Sem comentário de fim de linha** (`ini.cpp:45`) — só `#`/`;` abrindo a
   linha. Não é preguiça: `#` é o wildcard multinível do MQTT, e cortar dali pra
   frente transformaria `topics=umidade/#` (`iotrail.conf:57`) em
   `topics=umidade/`. A stream subscreveria outro tópico, calada. O parser
   anterior se comportava assim por omissão; aqui é decisão.
-- **Valor vazio (`host=`) passa** (`ini.cpp:93-95`): a chave foi escrita, existe.
+- **Valor vazio (`host=`) passa** (`ini.cpp:87-91`): a chave foi escrita, existe.
   Se vazio é aceitável depende da chave — domínio, 1.6. Mesma lógica pro `atoi`
   da porta: aqui tudo é string, a conversão com `std::from_chars` (que rejeita
   `"1883x"`, ao contrário do `atoi`) é 1.6.
-- **Falha ao abrir diz o motivo** (`ini.cpp:131-139`) — a dívida que a 1.4
+- **Falha ao abrir diz o motivo** (`ini.cpp:118-127`) — a dívida que a 1.4
   deixou. `errno` zerado antes do `ifstream` e `strerror` depois: "No such file
   or directory" e "Permission denied" (o que o Windows devolve quando o caminho
   é um diretório) pedem correções diferentes.
@@ -403,28 +404,144 @@ caso de uso.
 | arquivo inexistente | `No such file or directory` |
 | `-c <um diretório>` | `Permission denied` |
 
-O `main` passou a listar as seções em `debug` e os pares em `trace`
-(`main.cpp:33-39`) — é como se confere o que o parser leu sem depurador.
+Na época o `main` listava as seções cruas em `debug` e os pares em `trace`; a 1.6
+trocou esse despejo pelo resumo da config já validada.
 
-### 1.6 — Config: validação e regras do domínio
-Dar significado ao que a 1.5 leu: o que é um broker válido, o que é uma stream válida.
+### 1.6 — Config: validação e regras do domínio — FECHADO (2026-09-05)
 
-Decisões a tomar:
-- Config inválida derruba o boot ou cai em default? (O projeto antigo tinha
-  fallback `127.0.0.1:1883`, descartado na reescrita: 1883 é convenção IANA, mas
-  `127.0.0.1` não é convenção nenhuma pra "onde está meu broker".)
-- Severidade de cada erro: o que é fatal, o que é só aviso.
-- Uma seção ruim interrompe as outras ou o arquivo é lido até o fim?
-- Onde validar nome de stream — aqui ou no writer? (Aqui falha no boot nomeando
-  a seção culpada; lá falha num `fopen` obscuro depois.)
-- A config devolve um grafo stream→broker já resolvido, ou uma lista de seções
-  pra alguém interpretar depois?
+`src/config/config.h`/`.cpp`: dá significado ao que a 1.5 leu. Boa parte veio
+pronta de `knowledge_base/iotrail_refactory/src/config/config.cpp` — a reescrita
+aqui é de organização e de dois furos encontrados no teste (abaixo).
 
-### 1.7 — Fechamento da fase
-- Atualizar `docs/DESIGN.md` com o que a fase fechou (build, logging, config).
-  A parada ordenada já entrou junto da 1.3 (`DESIGN.md` §6), porque a restrição
-  de prazo do encerramento condiciona o writer da Fase 3.
-- Validar ponta a ponta: build limpo, boot com config válida, boot com config
-  inválida, Ctrl+C e fechar a janela.
-- Publicador de teste (`mosquitto_pub` de `tools/`, ou script Python) pronto pra
-  Fase 2.
+**Decisões tomadas:**
+
+- **`load(path)` + `validate(sections)` separados** (`config.h:43-44`), como na
+  1.5: `load` só encadeia `ini::parse_file` e `validate` (`config.cpp:347-351`).
+- **Reflete o arquivo e valida; não deriva nada.** A união dos `topics=` por
+  broker é o cliente MQTT que monta a partir das streams (Fase 2) — uma
+  representação derivada em vez de duas que podem divergir.
+- **A linha entre fatal e aviso:** fatal quando o programa não teria o que
+  fazer, ou faria a coisa errada calado; aviso quando o operador provavelmente
+  errou mas o comportamento resultante ainda é definido. Fatais: `host` ausente
+  ou vazio, porta não numérica ou fora de 1–65535, `type != mqtt`, broker ou
+  stream declarado duas vezes, nome de stream inválido, `broker=` ausente/vazio/
+  com lista, `broker=` citando broker não declarado, `topics=` ausente ou vazio,
+  seção sem tipo, zero brokers, zero streams. Avisos: chave desconhecida
+  (`config.cpp:53-61`), tipo de seção desconhecido, `client_id` acima de 23
+  caracteres, `client_id` repetido no mesmo `host:porta`, broker sem stream.
+- **Nada de `std::atoi` na porta** (`config.cpp:19-29`): o `strtol` só vale se
+  consumiu a string inteira — `atoi` aceitaria `"1883x"` como 1883 e `"abc"`
+  como 0, calado. Era um dos dois achados que a 1.5 mandou não perder.
+- **Padrão de tópico não é validado aqui** (`config.cpp:238`). Quem diz se um
+  filtro MQTT é legal é o broker, na subscrição (Fase 2); duplicar essa regra
+  aqui seria manter duas versões dela.
+- **Aviso de tópico repetido entre streams ficou de fora** — gravar o mesmo
+  tópico em duas streams é decisão legítima (retenções diferentes).
+- **`broker=` aceita um nome só, e a lista é rejeitada explicitamente**
+  (`config.cpp:207-219`): sem isso `casa,fabrica` viraria um nome literal e o
+  erro sairia como "broker não declarado", que não diz o que a pessoa fez de
+  errado.
+- **Nome de stream validado aqui, não no writer** (`config.cpp:63-83`): só
+  `[A-Za-z0-9_-]+`, mais os reservados do DOS (`CON`, `NUL`, `COM1`–`COM9`,
+  `LPT1`–`LPT9`), que passam na regra de caracteres mas não são criáveis no
+  Windows. Falhar aqui nomeia a seção culpada; falhar lá seria um `fopen`
+  obscuro depois.
+- **Broker citado é checado contra os *declarados*, não contra os carregados**
+  (`config.cpp:224-231`): senão um broker com porta inválida geraria também um
+  "broker desconhecido", culpando a stream por erro alheio.
+
+**Seção `[general]`, nova nesta rodada** (não existia na base de conhecimento):
+
+- **Sem tipo** — é a exceção à regra "seção precisa de tipo", porque não há o
+  que nomear. Qualquer outra seção sem tipo continua fatal (`config.cpp:301-306`).
+- **`data_dir`**, onde os segmentos serão gravados. Default `data`; caminho
+  relativo resolve contra o **diretório do executável** (`config.cpp:98-105`),
+  não contra o de trabalho nem contra o do `-c` — mover a config não move os
+  dados. Guardado já absoluto e normalizado.
+- **Não cria a pasta** — isso é do writer, Fase 3. Só falha se o caminho já
+  existir e **não** for diretório (`config.cpp:107-113`), que é o erro que o
+  `mkdir` daria bem mais tarde.
+- Documentada no `iotrail.conf:11-19`, com a entrada comentada no arquivo pra
+  valer o default.
+
+**Os dois furos que o teste achou** (ambos herdados do código anterior):
+
+1. **Duplicata invisível.** A checagem de "declarado mais de uma vez" olhava os
+   brokers/streams **carregados com sucesso**. Com `[broker:b1]` duas vezes e a
+   primeira falhando por outro motivo, a segunda entrava como se fosse única — a
+   duplicata só apareceria no boot seguinte, depois de corrigir o primeiro erro.
+   Agora a checagem é por nome **já visto** (`config.cpp:266-281`), independente
+   de ter carregado.
+2. **Mensagens fora da ordem do arquivo.** As duas passadas (brokers, depois o
+   resto) faziam os erros de broker saírem antes dos de linha menor. A primeira
+   passada agora só coleta nomes, sem validar nem logar (`config.cpp:256-261`), e
+   toda a validação acontece na segunda, em ordem de arquivo. As streams
+   continuam podendo citar um broker declarado abaixo delas.
+
+**Validado:**
+
+| caso | resultado |
+|---|---|
+| `iotrail.conf` real | 2 brokers, 3 streams, `data_dir` default `<exe>/data` |
+| 12 problemas num arquivo só | todos numa passada, em ordem de linha, exit 1 |
+| `[broker:b1]` repetido, primeiro inválido | os **dois** erros aparecem |
+| `data_dir=dados_teste` | vira `<dir do exe>\dados_teste` |
+| `data_dir` apontando pra um arquivo | fatal, com o caminho na mensagem |
+| `client_id` de 31 caracteres | aviso, boot segue |
+| broker sem stream | aviso, boot segue |
+| `[coisa:nova]` | aviso, ignorada |
+| `[casa]` sem tipo | fatal, sugerindo `[broker:casa]`/`[stream:casa]` |
+
+O `main` (`main.cpp:31-52`) passou a carregar a config pelo `config::load` e a
+resumir o que entendeu: brokers e streams em `debug`, tópicos em `trace`.
+
+### 1.7 — Fechamento da fase — FECHADO (2026-09-05)
+
+**Publicador de teste saiu do escopo** por decisão sua — entra na Fase 2, junto
+de quem vai consumir dele.
+
+**Validação ponta a ponta, com `build/` apagado antes:**
+
+| o que | resultado |
+|---|---|
+| configure + build do zero | 8 alvos, **zero aviso** com `-Werror` |
+| conteúdo do `build/` | `.exe` + 4 DLLs + `iotrail.conf`, sem intervenção |
+| `objdump -p` no `.exe` | só as 4 DLLs copiadas + `api-ms-win-crt-*`/`KERNEL32` |
+| rodar com o `PATH` **sem** MSYS2 | sobe normal — a cópia de DLL é o que sustenta |
+| boot com config válida | 2 brokers, 3 streams, `data_dir` resolvido |
+| boot com config inválida | todos os problemas em ordem de linha, exit 1 |
+| config inexistente | `No such file or directory`, exit 1 |
+| argumento inválido | erro + linha de uso, exit 1 |
+| Ctrl+C | encerra em **111 ms**, com "IoTrail encerrando" no log |
+| fechar a janela (`WM_CLOSE`) | encerra em **156 ms**, log completo |
+
+**Tamanho do binário:** 3,79 MB como sai do build (`RelWithDebInfo`, com `-g`) e
+**267 KB** depois de `strip` — ou seja, ~93% é informação de depuração, não
+código. Vale saber antes de comparar com o número da 1.1/1.2 e achar que o
+programa inchou.
+
+**O que o teste de sinais custou** (scripts no scratchpad, fora do repositório):
+
+- `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` mata o **próprio script** que
+  manda: `SetConsoleCtrlHandler(NULL, TRUE)` só ignora Ctrl+C, não Ctrl+Break.
+- A flag "ignorar Ctrl+C" é **herdada na criação do processo**, e herdada ela
+  vence o handler que o programa instala depois. Com o filho nascendo antes do
+  ignore, o Ctrl+C chega e a parada ordenada acontece; com o filho nascendo
+  depois, o evento simplesmente não é entregue — e parece bug do programa.
+  Este é o tipo de armadilha que faz um teste "provar" o contrário do que ocorre.
+
+**Âncoras dos docs revisadas.** Onze `arquivo:linha` do `DESIGN.md`/`TODO.md`
+apontavam pra fora ou pro lugar errado, porque comentários foram enxugados nos
+fontes depois que os registros foram escritos. Corrigidas. **Conferir isto é
+parte do fechamento de fase**, não tarefa avulsa: registro que aponta pra linha
+errada é pior que registro sem âncora.
+
+**`DESIGN.md` atualizado:** §4 (o `data/` agora é o `data_dir` da config), §5
+(duas camadas, régua fatal/aviso, `[general]`), §6 (ordem de boot com
+`cmdline::parse`, verbosidade) e §7 (flags de build, cópia de DLL, lista de
+módulos, PowerShell).
+
+**Fase 1 fechada.** O que ela entrega: build reproduzível, logging assíncrono,
+parada ordenada com o prazo do SO medido, linha de comando, e config lida,
+validada e resumida no boot. O que ela deliberadamente não tem: nenhum byte de
+MQTT, nenhum byte em disco.

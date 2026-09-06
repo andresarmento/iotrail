@@ -5,7 +5,7 @@
  */
 
 #include "cmdline.h"
-#include "ini.h"
+#include "config.h"
 #include "logging.h"
 #include "signals.h"
 #include <chrono>
@@ -30,19 +30,24 @@ int main(int argc, char* argv[]) {
   
     // Config file
     logging::debug("config: {}", opts->config.string());
-    const auto sections = ini::parse_file(opts->config);
-    if (!sections) {
+    const auto settings = config::load(opts->config);
+    if (!settings) {
         logging::shutdown();
         return 1;
     }
 
-    // Testes
-    logging::info("config lida: {} secoes", sections->size());
-    for (const auto& sec : *sections) {
-        logging::debug("  [{}:{}] linha {}, {} chaves", sec.type, sec.name, sec.line,
-                       sec.entries.size());
-        for (const auto& e : sec.entries) {
-            logging::trace("    {} = \"{}\"", e.key, e.value);
+    logging::info("config lida: {} broker(s), {} stream(s), data_dir {}",
+                  settings->brokers.size(), settings->streams.size(),
+                  settings->data_dir.string());
+    for (const auto& br : settings->brokers) {
+        logging::debug("  broker {} -> {}:{} (client_id {})", br.name, br.host, br.port,
+                       br.client_id);
+    }
+    for (const auto& st : settings->streams) {
+        logging::debug("  stream {} <- broker {}, {} topico(s)", st.name, st.broker,
+                       st.topics.size());
+        for (const auto& topic : st.topics) {
+            logging::trace("    {}", topic);
         }
     }
 
