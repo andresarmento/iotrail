@@ -154,7 +154,12 @@ endforeach()
 # O programa procura o iotrail.conf no proprio diretorio (tarefa 1.4), entao
 # esta copia nao e' conveniencia: sem ela nao ha config ao rodar do build. A
 # fonte e' o iotrail.conf da raiz; a copia e' descartavel.
-add_custom_command(TARGET iotrail POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/iotrail.conf" "$<TARGET_FILE_DIR:iotrail>"
-    VERBATIM)
+#
+# configure_file, e nao POST_BUILD do iotrail: POST_BUILD so roda quando o alvo
+# relinca, entao editar SO o .conf nunca chegava ao build/ - a copia ficava
+# velha em silencio ate alguem mexer num .cpp. Com configure_file o arquivo vira
+# dependencia de configure: mudou, o proximo build reconfigura e recopia.
+#
+# Destino fixo em CMAKE_CURRENT_BINARY_DIR porque o gerador e' single-config
+# (Ninja); $<TARGET_FILE_DIR:iotrail> nao e' aceito no OUTPUT de custom command.
+configure_file(iotrail.conf "${CMAKE_CURRENT_BINARY_DIR}/iotrail.conf" COPYONLY)

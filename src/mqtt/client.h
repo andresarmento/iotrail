@@ -28,8 +28,8 @@ namespace mqtt {
         static void on_disconnect(mosquitto* mosq, void* self, int rc);
         static void on_log(mosquitto* mosq, void* self, int level, const char* str);
 
-        const config::broker broker_;
         mosquitto* mosq_ = nullptr;
+        const config::broker broker_;
 
         std::atomic<bool> connected_{false};
         std::atomic<bool> ever_connected_{false};

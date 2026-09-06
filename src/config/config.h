@@ -19,6 +19,10 @@ namespace config {
         std::string host;
         int port = 1883;
         std::string client_id;
+
+        // Segundos entre PINGREQ. E' tambem o tempo que a lib leva pra perceber
+        // uma conexao morta, inclusive na primeira tentativa (medido na 2.2).
+        int keepalive = 30;
     };
 
     struct stream {

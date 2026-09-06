@@ -108,7 +108,8 @@ sem ambiguidade.
 
 - **O arquivo-fonte é o da raiz do projeto**; o build copia uma versão dele pro
   lado do executável, e é de lá que o programa lê. Editar a cópia em `build/`
-  não adianta.
+  não adianta — e editar a fonte basta: ela é dependência de configure, então o
+  próximo build recopia.
 - **Onde o programa procura:** `-c <arquivo>` na linha de comando vence; sem a
   flag, é o `iotrail.conf` do **diretório do executável**, nunca o diretório de
   trabalho — este muda conforme quem chama (atalho, serviço, tarefa agendada).
@@ -136,8 +137,11 @@ sem ambiguidade.
   o cliente MQTT que monta a partir das streams — uma representação derivada em
   vez de duas que podem divergir.
 - **`[general]` é a única seção sem tipo** — não há o que nomear. Hoje carrega
-  só `data_dir` (onde os segmentos são gravados). Relativo resolve contra o
-  diretório do executável, e a pasta não é criada aqui: isso é do writer.
+  só `data_dir`: onde os segmentos são gravados; relativo resolve contra o
+  diretório do executável, e a pasta não é criada aqui — isso é do writer.
+- **`keepalive` é por broker** (`[broker:*]`, default 30 s), porque é parâmetro
+  da conexão, negociado em cada CONNECT: brokers em links diferentes querem
+  valores diferentes.
 - **Nome de stream é validado no boot**, na config, não no writer: nome vira
   pasta e arquivo, e tem que falhar nomeando a seção culpada, não num `fopen`
   obscuro depois. Só `[A-Za-z0-9_-]+`, mais rejeição dos nomes reservados do DOS
@@ -156,6 +160,14 @@ logging vem primeiro porque erro de qualquer um dos outros precisa de onde sair.
 A linha de comando é conferida antes dos sinais (`main.cpp:18-22`): argumento
 errado sai com código 1, e nesse ponto não há nada montado pra parar de forma
 ordenada.
+
+**Reconexão é da lib, não nossa.** Não há supervisão no laço do `main`: a
+libmosquitto retenta sozinha, inclusive a primeira conexão, com backoff de 1 a
+60 s. O que ela **não** faz é perceber a falha na hora — com `connect_async`, uma
+conexão que nunca subiu só é declarada morta quando o keepalive estoura (medido:
+o aviso sai em 30 s com `keepalive=30`, em 10 s com `keepalive=10`). Por isso o
+keepalive é chave de config: ele é o botão que regula a janela cega, e o preço
+de encurtá-la é PINGREQ mais frequente.
 
 **Verbosidade:** `-v` liga `debug`, `-vv` liga `trace`, aplicados logo depois do
 `init()` (`main.cpp:25-29`). Sem flag o nível é `info`. É o único jeito de mudar

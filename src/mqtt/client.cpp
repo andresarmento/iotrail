@@ -10,7 +10,6 @@
 #include <utility>
 
 namespace mqtt {
-    static constexpr int keepalive_s = 60;
     static constexpr unsigned reconnect_delay_s = 1;
     static constexpr unsigned reconnect_delay_max_s = 60;
 
@@ -47,10 +46,9 @@ namespace mqtt {
         // estabelecida - a primeira e' supervisao nossa.
         mosquitto_reconnect_delay_set(mosq_, reconnect_delay_s, reconnect_delay_max_s, true);
 
-        // Nao bloqueia: a conexao acontece na thread da lib. O sincrono ficava
-        // preso no timeout do SYN, 19s de boot travado com host inalcancavel.
+        // Prepara a conexao; quem a executa e' a thread da lib, criada no loop_start em seguida
         const int rc = mosquitto_connect_async(mosq_, broker_.host.c_str(), broker_.port,
-                                               keepalive_s);
+                                               broker_.keepalive);
         if (rc != MOSQ_ERR_SUCCESS) {
             logging::warn("[mqtt/{}] connect_async em {}:{}: {}", broker_.name, broker_.host,
                           broker_.port, error_text(rc));

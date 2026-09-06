@@ -45,8 +45,8 @@ int main(int argc, char* argv[]) {
                   settings->brokers.size(), settings->streams.size(),
                   settings->data_dir.string());
     for (const auto& br : settings->brokers) {
-        logging::debug("  broker {} -> {}:{} (client_id {})", br.name, br.host, br.port,
-                       br.client_id);
+        logging::debug("  broker {} -> {}:{} (client_id {}, keepalive {}s)", br.name, br.host,
+                       br.port, br.client_id, br.keepalive);
     }
     for (const auto& st : settings->streams) {
         logging::debug("  stream {} <- broker {}, {} topico(s)", st.name, st.broker,

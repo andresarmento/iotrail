@@ -8,7 +8,7 @@ Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocíni
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
-mesma data; 2.1 e 2.2 fechadas em 2026-09-06. Próxima tarefa: 2.3.
+mesma data; 2.1, 2.2 e 2.3 fechadas em 2026-09-06. Próxima tarefa: 2.4.
 
 ---
 
@@ -568,10 +568,16 @@ linhas). São medições, não preferências:
 - **`connect_async` + `loop_start`, não `connect` síncrono.** Com host
   inalcançável o síncrono ficava preso no timeout do SYN: **19 s de boot
   travado**.
-- **O auto-reconnect da lib só cobre queda DEPOIS de uma conexão estabelecida**
-  (`mosquitto.h:1657`, "unexpectedly disconnected"). Com o broker fora do ar no
-  boot, a lib manda um CONNECT e nunca mais tenta — o cliente fica morto calado.
-  É isso que obriga a supervisão da 2.3.
+- **~~O auto-reconnect da lib só cobre queda DEPOIS de uma conexão
+  estabelecida; com o broker fora do ar no boot, a lib manda um CONNECT e nunca
+  mais tenta.~~ REFUTADO na 2.2 (2026-09-06).** O que a lib faz com
+  `connect_async` é ficar **cega por um keepalive** — ela não percebe o TCP que
+  falhou e só declara a conexão morta quando esse timer estoura (medido: 60,004 s
+  com keepalive 60; 10,014 s com keepalive 10). A partir daí ela **retenta
+  sozinha**, e reconecta quando o broker volta. O texto do header
+  (`mosquitto.h:1657`, "unexpectedly disconnected") descreve a política, não o
+  limite que se supunha. Isso muda o propósito da supervisão da 2.3: encurtar a
+  janela cega e dar visibilidade, não suprir uma ausência.
 - **`stop()` tem que distinguir disconnect de force.** `loop_stop(force=false)`
   bloqueia até a thread da lib terminar, e ela só termina se o disconnect tiver
   funcionado. Medido lá: **~11 s de atraso** no encerramento com broker
@@ -594,7 +600,8 @@ linhas). São medições, não preferências:
 - **API C (`libmosquitto`)**, não o wrapper `libmosquittopp`: ele não expõe o
   `mosquitto*` interno, o que fecharia a porta pro MQTT 5 (`DESIGN.md:188-190`).
 - **Os clientes vivem no `main`** por enquanto — sem supervisor.
-- **O `tick()` pendura no laço de 200 ms que já existe** (`main.cpp:57-59`), sem
+- **O `tick()`, se entrar** (a premissa dele foi revista na 2.2 — ver 2.3),
+  **pendura no laço de 200 ms que já existe** (`main.cpp:82-84`), sem
   thread nem timer novos. O ritmo real é o backoff, não o laço; os 200 ms só dão
   a granularidade do disparo, irrelevante contra 1 s. Diminuir gastaria CPU à toa
   (o alvo é edge); aumentar sairia do orçamento de encerramento da 1.3.
@@ -732,13 +739,47 @@ o broker vê um TCP fechado na marra em vez de um DISCONNECT — irrelevante num
 processo que está saindo. E `force` é `pthread_cancel`: só vale porque isto roda
 na saída; restart em execução (se algum dia existir) precisa de outra saída.
 
-**O outro achado: falha de conexão inicial é 100% silenciosa.** Com a porta
-fechada em `127.0.0.1:18999` e `-vv`, o log tem só a linha `sending CONNECT` da
-própria lib — não há `on_connect`, não há `on_disconnect`, e o `on_log` não diz
-nada. Ou seja: **host errado na config é hoje indistinguível de tudo certo**,
-até alguém reparar que a linha "conectado em ..." nunca veio. É o argumento
-empírico pro `tick()` da 2.3, que passa a ser mais do que "reconectar": é o que
-torna a falha visível.
+**O outro achado, e ele foi corrigido duas vezes — a versão final é esta:**
+falha de conexão inicial fica **cega por exatamente um keepalive**, e depois a
+própria lib passa a retentar.
+
+Cronologia medida, broker desligado e religado no meio:
+
+```
+12:46:52.914  conectando em 127.0.0.1:1883     CONNECT enviado, TCP recusado, silêncio
+12:47:52.918  [warning] conexao inicial falhou  60,004 s depois
+12:48:12.982  conectado em 127.0.0.1:1883       broker voltou; a LIB reconectou sozinha
+```
+
+Os 60 s são o keepalive, não coincidência: refazendo com `keepalive_s = 10`, o
+aviso saiu em **10,014 s**. Com `connect_async` a lib não percebe o TCP que
+falhou; ela só declara a conexão morta quando o timer de keepalive estoura, e é
+aí que chama `on_disconnect` (nossa linha `client.cpp:111`) e entra no ciclo de
+reconexão. As tentativas seguintes são invisíveis — não há callback por
+tentativa, e o `sending CONNECT` do log da lib só sai quando o TCP conecta —
+mas estão acontecendo, tanto que a conexão subiu no instante em que o broker
+voltou.
+
+**Duas correções que isso obriga:**
+
+1. **Minhas primeiras medições estavam curtas.** Janelas de 3 a 12 s, contra um
+   sintoma que aparece em 60 — daí eu ter registrado "silêncio total" e "a lib
+   não retenta". Achado do André, testando com o broker real e paciência maior.
+2. **O registro herdado ("a lib manda um CONNECT e nunca mais tenta") está
+   errado**, e provavelmente pelo mesmo motivo. Ver a correção na seção herdada
+   da Fase 2.
+
+**O que sobra pro `tick()` da 2.3** — e é diferente do que o plano dizia. Não é
+mais "a lib não cobre a primeira conexão"; é:
+
+- **encurtar a janela cega**, que hoje é o keepalive inteiro (60 s por padrão) e
+  só existe na primeira conexão;
+- **dar visibilidade**, porque hoje não há uma linha sequer entre a tentativa e
+  a desistência, nem durante as retentativas da lib.
+
+E abre uma alternativa que não existia no plano: **baixar o keepalive** encurta
+a janela sem código nenhum — ao custo de PINGREQ mais frequente, o que em edge é
+tráfego e energia. Comparar as duas saídas é decisão da 2.3.
 
 **Validado** (broker local `tools/mosquitto.exe` 1.6.3, e `192.0.2.1` como host
 que engole SYN):
@@ -752,17 +793,66 @@ que engole SYN):
 | porta fechada | conexão recusada **sem nenhuma linha de erro** (ver acima) |
 | build | zero aviso com `-Werror` |
 
-### 2.3 — Reconexão e supervisão
-O `tick()` que cobre o buraco da primeira conexão.
+### 2.3 — Reconexão e supervisão — FECHADO (2026-09-06), **sem `tick`**
 
-Decisões a tomar:
-- Retry nosso **só** até a primeira conexão; depois é a lib. Insistir nos dois
-  lugares criaria tentativas concorrentes.
-- Log de estado sem spam: reconectando a cada 60 s por uma noite são ~500 linhas.
-  Uma linha por transição de estado, ou uma a cada N tentativas?
-- O que acontece se **nenhum** broker conectar: sobe assim mesmo (com aviso) ou
-  derruba? A Fase 1 fechou que config inválida derruba o boot, mas broker fora do
-  ar não é config inválida.
+A premissa da tarefa caiu na 2.2: a lib **retenta a primeira conexão sozinha**.
+O que restava era a janela cega de um keepalive inteiro antes de ela começar. A
+decisão foi resolver isso **sem código de supervisão**.
+
+**Decisões tomadas:**
+
+- **Nenhum `tick`, nenhuma retentativa nossa.** Reconexão é 100% da lib. Some
+  junto o risco que o `tick` planejado carregava: `mosquitto_reconnect_async`
+  chama `getaddrinfo`, que é síncrono — com DNS inacessível ele travaria a
+  thread do `main`, que é a mesma que checa a parada a cada 200 ms.
+- **`keepalive` vira chave, default 30 s** (`config.h:25`). Cortar de 60 pra 30
+  corta a janela cega pela metade sem escrever linha nenhuma de supervisão, e
+  melhora também o regime normal: o keepalive é o que detecta conexão morta em
+  silêncio (cabo arrancado, NAT expirado, Wi-Fi que caiu sem FIN). Preço: um par
+  PINGREQ/PINGRESP a cada 30 s por broker em vez de 60 — bytes irrelevantes, mas
+  o dobro de *acordares*, que é o que importaria em bateria ou link celular.
+- **Chave em `[broker:*]`, não em `[general]`** (`config.cpp:149-164`). Entrou
+  primeiro em `[general]` e foi movida no mesmo dia, a pedido do André: o
+  keepalive é parâmetro **da conexão**, negociado em cada CONNECT, e dois
+  brokers em links diferentes (LAN e celular, por exemplo) querem valores
+  diferentes. Custo de ter movido: com N brokers iguais, o valor se repete N
+  vezes. Se isso incomodar, o caminho é `[general]` virar o default de quem não
+  declara — sem quebrar arquivo nenhum.
+- **Faixa 0–65535**, que é a do campo de 16 bits do MQTT 3.1.1. Fora dela é
+  fatal; **`keepalive=0` é aviso**, não erro: é legal na especificação (desliga
+  o PINGREQ), mas desliga junto a detecção de conexão morta, e isso tem que
+  aparecer no log de quem escolheu.
+- **O `parse_port` virou `parse_int(text, min, max, out)`** (`config.cpp:19-29`),
+  usado pela porta (1–65535) e pelo keepalive (0–65535). Mesma proteção contra o
+  `atoi` que aceita `"1883x"`.
+
+**O que fica em aberto de propósito:** durante a janela cega — e durante uma
+queda longa — **não há uma linha sequer no log**. São duas linhas nas pontas
+(caiu / voltou) e silêncio no meio. Uma supervisão só de log (sem reconectar)
+resolveria, e é barata; ficou de fora por ora. Reabrir se, em uso, a falta
+incomodar.
+
+**Validado:**
+
+| caso | resultado |
+|---|---|
+| sem a chave | aviso de falha em **30,002 s** (default aplicado) |
+| `keepalive=10` | aviso em **10,003 s** — a chave chega ao cliente |
+| `keepalive=abc` | fatal, "esperado 0-65535 segundos", exit 1 |
+| `keepalive=99999` | fatal (fora dos 16 bits do campo) |
+| `keepalive=0` | aviso de que desliga a detecção, boot segue |
+| dois brokers, 10 e default | avisos em **10,015 s** e **30,007 s**, no mesmo processo |
+
+**Saiu junto: a cópia do `iotrail.conf` estava ficando velha em silêncio.** Ela
+era `POST_BUILD` do alvo `iotrail`, e `POST_BUILD` só roda quando o alvo
+**relinca** — editar apenas o `.conf` nunca chegava ao `build/`. Descoberto ao
+vivo: depois de reescrever o cabeçalho do arquivo, o `cmake --build` respondeu
+`ninja: no work to do` e o programa continuou lendo a versão antiga. Agora é
+`configure_file(... COPYONLY)` (`CMakeLists.txt:165`), que registra o arquivo
+como dependência de configure: mudou, o próximo build reconfigura e recopia.
+Verificado nos dois sentidos, inserindo e removendo um marcador. (Primeira
+tentativa foi um alvo próprio com `add_custom_command`, que não compila:
+`OUTPUT` não aceita `$<TARGET_FILE_DIR:...>`.)
 
 ### 2.4 — Subscrição e QoS
 Decisões a tomar:
