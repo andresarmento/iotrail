@@ -161,6 +161,19 @@ A linha de comando é conferida antes dos sinais (`main.cpp:18-22`): argumento
 errado sai com código 1, e nesse ponto não há nada montado pra parar de forma
 ordenada.
 
+**O roteamento é do cliente, sem estrutura compartilhada.** Cada cliente conhece
+só as streams do seu broker, numa lista imutável desde a construção — com N
+threads da lib rodando callbacks ao mesmo tempo, não há lock no caminho da
+mensagem. O casamento usa `mosquitto_topic_matches_sub` da própria lib, e a
+mensagem vai para **todas** as streams cujo padrão casa.
+
+**As inscrições são refeitas a cada (re)conexão**, de dentro do `on_connect`:
+com `clean_session=true` o broker esquece o que o cliente pediu quando a conexão
+cai. O cliente subscreve a união dos `topics=` das suas streams, com dedup, um
+SUBSCRIBE por padrão — assim o SUBACK identifica qual padrão o broker recusou.
+QoS 0 nesta fase: com QoS 1 a lib confirmaria entrega de mensagem que ainda não
+tem onde ser gravada.
+
 **Reconexão é da lib, não nossa.** Não há supervisão no laço do `main`: a
 libmosquitto retenta sozinha, inclusive a primeira conexão, com backoff de 1 a
 60 s. O que ela **não** faz é perceber a falha na hora — com `connect_async`, uma

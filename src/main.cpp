@@ -64,7 +64,12 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::unique_ptr<mqtt::client>> clients;
     for (const auto& br : settings->brokers) {
-        clients.push_back(std::make_unique<mqtt::client>(br));
+        // Obtem as streams para o broker em questão
+        std::vector<const config::stream*> streams;
+        for (const auto& st : settings->streams) {
+            if (st.broker == br.name) streams.push_back(&st);
+        }
+        clients.push_back(std::make_unique<mqtt::client>(br, std::move(streams)));
         if (!clients.back()->start()) {
             clients.clear();
             mqtt::shutdown();

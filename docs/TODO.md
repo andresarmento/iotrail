@@ -8,7 +8,7 @@ Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocíni
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
-mesma data; 2.1, 2.2 e 2.3 fechadas em 2026-09-06. Próxima tarefa: 2.4.
+mesma data; 2.1 a 2.5 fechadas em 2026-09-06. Próxima tarefa: 2.6.
 
 ---
 
@@ -854,35 +854,110 @@ Verificado nos dois sentidos, inserindo e removendo um marcador. (Primeira
 tentativa foi um alvo próprio com `add_custom_command`, que não compila:
 `OUTPUT` não aceita `$<TARGET_FILE_DIR:...>`.)
 
-### 2.4 — Subscrição e QoS
-Decisões a tomar:
-- **Subscrever a cada (re)conexão**, não uma vez no `start()`: com
-  `clean_session=true` o broker esquece as inscrições quando a conexão cai.
-- A união dos padrões sai das streams do broker, com dedup (duas streams podem
-  declarar o mesmo padrão; o SUBSCRIBE repetido seria inofensivo, mas apareceria
-  duas vezes no log).
-- **QoS 0 nesta fase** — a proposta. QoS 1 sem writer não entrega nada: o
-  "recebi" só significa alguma coisa quando existe disco atrás, e
-  `clean_session=false` só faz sentido junto de QoS > 0. Confirmar e registrar o
-  que fica pra Fase 3/4.
-- Um SUBSCRIBE por padrão ou `subscribe_multiple`?
+### 2.4 — Subscrição e QoS — FECHADO (2026-09-06)
 
-### 2.5 — Roteamento tópico → stream
-Fan-out e aviso do tópico órfão já estão decididos acima. **Em aberto de
-propósito — decidir quando a tarefa chegar:**
-- **Onde o roteamento mora:** lista imutável de streams por cliente (sem lock,
-  mesmo com N threads da lib) ou roteador compartilhado.
-- **O que a callback entrega:** chamar direto o sink temporário (concreto) ou já
-  desenhar uma interface `on_message(...)`. Argumento pelo concreto: a assinatura
-  certa depende do que o writer da Fase 3 vai querer (registro pronto? payload
-  cru? slot pré-alocado?), e desfazer abstração errada custa mais que trocar o
-  corpo de uma função.
-- **Timestamp de chegada** (`DESIGN.md:69-70`): `system_clock` em ms já nesta
-  fase, ou só quando houver registro pra carimbar.
+O cliente passa a pedir tópicos ao broker. Entrega de mensagem ainda não: o
+`on_message` é a 2.5.
 
-Ponto técnico que não é decisão: usar `mosquitto_topic_matches_sub` da própria
-lib. Matcher de wildcard escrito à mão erra nos cantos (`+` no meio do nível,
-`#` que não casa `$SYS`).
+**Decisões tomadas:**
+
+- **O cliente recebe as streams do seu broker** (`client.h:22`,
+  `main.cpp:67-71`): `vector<const config::stream*>` apontando pra dentro do
+  `settings`, que é declarado antes dos clientes no `main` e destruído depois
+  deles. Ponteiro e não cópia porque a 2.5 vai precisar da identidade da stream,
+  não só dos padrões — e porque ninguém muda esses dados depois do boot.
+- **SUBSCRIBE dentro do `on_connect`** (`client.cpp:102-138`), não no `start()`:
+  com `clean_session=true` o broker esquece as inscrições a cada queda, então
+  toda reconexão precisa refazê-las. Verificado derrubando e subindo o broker:
+  as três inscrições saem de novo sozinhas.
+- **Um SUBSCRIBE por padrão**, não `subscribe_multiple`. O SUBACK volta com o
+  `mid`, e um mapa `mid → padrão` (`client.h:45`) permite dizer **qual**
+  inscrição o broker recusou. Com `subscribe_multiple` a mensagem seria "o
+  broker recusou uma inscrição", sem dizer qual — o tipo de log inútil que o
+  projeto vem evitando. Custo: N pacotes por conexão, uma vez.
+- **Dedup dos padrões** (`client.cpp:110-120`): duas streams do mesmo broker
+  podem declarar o mesmo tópico. Medido com 4 padrões declarados → 3 SUBSCRIBEs.
+- **QoS 0, como constante** (`client.cpp:14`), sem chave de config. Discutido e
+  adiado de propósito: com QoS 1 a lib manda o PUBACK sozinha quando o callback
+  retorna, ou seja, **confirmaríamos a entrega de mensagens que jogamos fora** —
+  pior que QoS 0, que não promete nada. E o QoS não viaja sozinho: pra valer
+  precisa de `clean_session=false`, `client_id` estável e disco atrás. Entra como
+  pacote na Fase 3/4, e provavelmente **por stream**, que é a granularidade do
+  MQTT (o QoS é pedido por filtro no SUBSCRIBE), com default por broker se fizer
+  falta.
+- **O `mid → padrão` não tem lock** (`client.h:43-45`): `on_connect` e
+  `on_subscribe` rodam na mesma thread da lib, uma por cliente.
+
+**Bug encontrado no próprio teste:** o resumo contava os padrões *tentados*, não
+os aceitos — com um padrão inválido, o log dizia "1 inscrição pedida" quando
+nenhuma tinha saído. Agora são duas variáveis (`client.cpp:110-111`): a lista de
+dedup, que inclui os que falharam, e o contador, que só sobe quando a lib aceita
+enviar.
+
+**Validado** (broker local `tools/mosquitto.exe`):
+
+| caso | resultado |
+|---|---|
+| 4 padrões em 2 streams, um repetido | 3 SUBSCRIBEs; o broker registra 3 |
+| publicação em `teste/x` | broker entrega ao cliente (que descarta — 2.5) |
+| broker cai e volta | as 3 inscrições são refeitas na reconexão |
+| padrão inválido `a/#/b` | rejeitado pela lib com o padrão no log; contagem 0 |
+| **SUBACK `0x80`** | **sem teste** — o mosquitto 1.6.3 do `tools/` concede a inscrição mesmo com ACL negando (`iotrail-local 0 proibido/x` no log dele) e filtra só na entrega. Reproduzir precisaria de broker 2.x |
+
+### 2.5 — Roteamento tópico → stream — FECHADO (2026-09-06)
+
+`client::on_message` (`client.cpp:167-215`): a mensagem que chega vira "tópico X
+→ stream Y". Contadores por stream e sink de verdade continuam na 2.6.
+
+**Decisões tomadas:**
+
+- **O roteamento mora no cliente**, na lista imutável `streams_` que a 2.4 já
+  trouxe. A pergunta que estava aberta se fechou por construção: nada é
+  compartilhado entre as N threads da lib, então não há lock no caminho da
+  mensagem.
+- **Callback concreta, sem interface de sink** — mantida a recomendação do
+  planejamento. A assinatura certa depende do que o writer da Fase 3 vai querer
+  (registro pronto? payload cru? slot pré-alocado?), e desfazer abstração errada
+  custa mais que trocar o corpo de uma função.
+- **Timestamp carimbado na chegada** (`client.cpp:170-173`), `system_clock` em
+  ms, já nesta fase — mesmo sem ninguém consumir. Se ficasse pra Fase 3, o risco
+  era alguém carimbar no writer, e aí o valor passaria a incluir o tempo de fila,
+  contrariando o `DESIGN.md` §3 sem que nada acusasse.
+- **`mosquitto_topic_matches_sub` da lib** (`client.cpp:190`), não matcher
+  próprio: `+` no meio do nível, `#` só no fim e o fato de `#` não casar `$SYS`
+  são cantos onde implementação à mão erra.
+- **Fan-out para todas as streams que casam** (`client.cpp:184-201`), com um
+  `break` no primeiro padrão que casa **dentro** de cada stream — um padrão já
+  resolve a stream, os outros dela não mudam nada.
+- **O payload não é impresso.** A linha de `trace` traz tópico, stream, tamanho
+  em bytes e o timestamp de chegada — só metadado. Chegou a existir um preview
+  truncado e sanitizado (64 bytes, byte fora de `0x20..0x7e` virando `.`), que o
+  André pediu e depois retirou. O motivo de ele ser sanitizado, se um dia voltar:
+  payload é opaco, então um dia vem binário, e **escape ANSI vindo do payload
+  reconfigura o terminal de quem está lendo o log** — verificado na época
+  publicando `ESC[31mX`, que saía como `a.[31mX`.
+- **Tópico sem stream: aviso na primeira ocorrência + total no encerramento**
+  (`client.cpp:203-213` e `client.cpp:88-93`). O contador é atômico porque é
+  escrito na thread da lib e lido no `stop()`; a leitura acontece depois do join,
+  mas o atômico dispensa raciocinar sobre isso.
+
+**O caso "sem stream" deixou de ser hipotético.** No planejamento eu argumentei
+que ele indica bug nosso, já que as inscrições são a união dos padrões das
+streams. Consegui reproduzir de propósito com **subscrição compartilhada**:
+`topics=$share/g1/casa/#` faz o broker entregar `casa/temp`, enquanto o padrão
+guardado é a string `$share/...` — o matcher compara os dois e não casa. Ou seja,
+o cenário existe de verdade e vale a pena ter o aviso. (Suporte a `$share` não é
+decisão desta fase; virou caso de teste.)
+
+**Validado** (broker local, publicando com `tools/mosquitto_pub.exe`):
+
+| caso | resultado |
+|---|---|
+| `casa/temp` com streams `casa/#` e `casa/temp` | **duas** linhas, uma por stream |
+| `casa/umidade` | só a stream `casa/#` |
+| payload com TAB e ESC | testado na versão com preview, hoje removida |
+| `$share/g1/casa/#` | aviso na 1ª mensagem, silêncio nas seguintes |
+| encerramento após 3 órfãs | `3 mensagem(ns) sem stream no total`, antes do "encerrado" |
 
 ### 2.6 — Sink temporário e parada
 Decisões a tomar:
