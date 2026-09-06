@@ -7,8 +7,8 @@ escrever a tarefa seguinte na mesma leva.
 Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocínio
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
-**Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Próxima: Fase 2,
-cliente MQTT.
+**Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
+mesma data; 2.1 fechada em 2026-09-06. Próxima tarefa: 2.2.
 
 ---
 
@@ -20,9 +20,11 @@ anterior; a reescrita é de organização do código, não de rumo.
 - **C++17 + STL.** C++20 foi avaliado e descartado nesta rodada — o ganho real
   seria `std::jthread`/`std::stop_token` e `std::span`. GCC 16.2.0 compila os
   dois, então subir depois continua possível. Sem extensões GNU.
-- **Lib MQTT: mosquitto (`libmosquittopp`)**, MQTT 3.1.1. Validada contra broker
-  real em `knowledge_base/src/test_3/`. Paho C++ nunca chegou a ser avaliado —
-  não houve motivo.
+- **Lib MQTT: mosquitto**, MQTT 3.1.1. Validada contra broker real em
+  `knowledge_base/src/test_3/`. Paho C++ nunca chegou a ser avaliado — não houve
+  motivo. **A API é a C (`libmosquitto`)**, decidido na 2.1: o wrapper
+  `libmosquittopp`, usado nas rodadas anteriores, não expõe o `mosquitto*`
+  interno e fecharia a porta pro MQTT 5.
 - **Lib de logging: spdlog**, em modo assíncrono. Motivo em
   `knowledge_base/docs/decisao_sync_write.txt`: logar de forma síncrona no
   caminho de recebimento reintroduz a variância de latência que o projeto
@@ -545,3 +547,204 @@ módulos, PowerShell).
 parada ordenada com o prazo do SO medido, linha de comando, e config lida,
 validada e resumida no boot. O que ela deliberadamente não tem: nenhum byte de
 MQTT, nenhum byte em disco.
+
+---
+
+## Fase 2 — Cliente MQTT
+
+Desmembrada em 2026-09-05, no mesmo formato da Fase 1: eu apresento as decisões
+em aberto → você decide → escrevo aquele pedaço → paro.
+
+**Termina quando** o processo conecta em N brokers, subscreve o que a config
+manda, recebe mensagens e as roteia pra stream certa, aguentando broker fora do
+ar e queda no meio. **Fora desta fase:** fila em RAM, writer, formato de
+registro, disco — o "sink" aqui é contador e log.
+
+### Herdado da base de conhecimento — medido, não reabrir sem motivo novo
+
+Da rodada anterior (`knowledge_base/iotrail_refactory/src/mqtt_client.cpp`, 273
+linhas). São medições, não preferências:
+
+- **`connect_async` + `loop_start`, não `connect` síncrono.** Com host
+  inalcançável o síncrono ficava preso no timeout do SYN: **19 s de boot
+  travado**.
+- **O auto-reconnect da lib só cobre queda DEPOIS de uma conexão estabelecida**
+  (`mosquitto.h:1657`, "unexpectedly disconnected"). Com o broker fora do ar no
+  boot, a lib manda um CONNECT e nunca mais tenta — o cliente fica morto calado.
+  É isso que obriga a supervisão da 2.3.
+- **`stop()` tem que distinguir disconnect de force.** `loop_stop(force=false)`
+  bloqueia até a thread da lib terminar, e ela só termina se o disconnect tiver
+  funcionado; quando o cliente nunca conectou, o disconnect devolve
+  `MOSQ_ERR_NO_CONN` sem fazer nada. Medido: **~11 s de atraso** no encerramento
+  com broker inalcançável.
+- **`mosquitto_strerror` devolve "Unknown error" para `MOSQ_ERR_ERRNO`**, que é o
+  código de quase toda falha de rede. Sem o `errno` do sistema junto, "recusado",
+  "host inalcançável" e "DNS falhou" viram a mesma mensagem inútil. O `errno` é
+  preenchido também no Windows.
+- **Ambiente conferido nesta máquina:** `libmosquitto.dll` e `libmosquittopp.dll`
+  no ucrt64, `libmosquitto.pc` no pkgconfig (não há pacote CMake), e
+  `mosquitto.exe` + `mosquitto_pub/sub` já em `tools/` — dá pra testar com broker
+  local, sem depender da rede.
+
+### Decidido no planejamento (2026-09-05)
+
+- **API C (`libmosquitto`)**, não o wrapper `libmosquittopp`: ele não expõe o
+  `mosquitto*` interno, o que fecharia a porta pro MQTT 5 (`DESIGN.md:188-190`).
+- **Os clientes vivem no `main`** por enquanto — sem supervisor.
+- **O `tick()` pendura no laço de 200 ms que já existe** (`main.cpp:57-59`), sem
+  thread nem timer novos. O ritmo real é o backoff, não o laço; os 200 ms só dão
+  a granularidade do disparo, irrelevante contra 1 s. Diminuir gastaria CPU à toa
+  (o alvo é edge); aumentar sairia do orçamento de encerramento da 1.3.
+  **`steady_clock`, nunca `system_clock`** — ajuste de NTP moveria o próximo
+  retry pra frente ou pra trás.
+- **Backoff de 1 s a 60 s nos DOIS lados:** o nosso, da primeira conexão, e o da
+  lib (`mosquitto_reconnect_delay_set`, que sai 30 s por padrão). Diferentes, o
+  comportamento mudaria conforme o cliente já tivesse conectado alguma vez — o
+  tipo de coisa que faz procurar problema no lugar errado.
+- **SUBACK recusado (`0x80`) é aviso, não fatal.**
+- **Fan-out: a mensagem vai para TODAS as streams cujo padrão casa**, não para a
+  primeira. Com "primeira que casa", a ordem de declaração viraria roteamento
+  invisível e uma stream pararia de receber calada; declarar duas streams
+  sobrepostas (uma `#` de arquivo e uma específica) é escolha de quem
+  configurou, e cada uma tem sua retenção e seu offset.
+- **Tópico sem stream: aviso na primeira ocorrência (com o tópico) + contador
+  reportado no encerramento** — e o enquadramento aqui **diverge da rodada
+  anterior**, que tratou isso como "sensor não mapeado" e adiou a decisão com
+  medo de inundar o log. Como as subscrições são exatamente a união dos padrões
+  das streams (2.4), toda mensagem entregue casou com um padrão nosso, logo casa
+  com alguma stream: cair aqui significa que o nosso matcher e o do broker
+  discordam, ou seja, **bug nosso**, não erro de config. Custo: ~6 linhas, zero
+  no caminho quente (o laço do fan-out já sabe se alguma casou), ~16 bytes por
+  cliente, no máximo duas linhas de log por processo — e continua duas linhas se
+  o raciocínio acima estiver errado e a coisa acontecer em volume.
+
+### 2.1 — A lib entra no build — FECHADO (2026-09-06)
+
+`src/mqtt/mqtt.h`/`.cpp` (só `init()`/`shutdown()`) mais a descoberta, o link e a
+cópia de DLL no `CMakeLists.txt`. **libmosquitto 2.0.22**, do pacman.
+
+**Decisões tomadas:**
+
+- **pkg-config, não `find_library`** (`CMakeLists.txt:52-62`). Não há pacote
+  CMake no MSYS2, só `libmosquitto.pc`; `pkg_check_modules(... IMPORTED_TARGET)`
+  entrega include e link resolvidos e ainda dá a versão em tempo de configure,
+  que aparece no `-- libmosquitto 2.0.22` do log do CMake. `find_library` exigiria
+  nome de lib e include path escritos à mão.
+- **`PKG_CONFIG_PATH` vem da variável de cache `IOTRAIL_MSYS2_UCRT64`**
+  (`CMakeLists.txt:59`), não do ambiente: senão o resultado do configure depende
+  do `PATH` de quem chamou, que é o tipo de dependência invisível que a 1.1
+  evitou em todo o resto.
+- **`mosquitto_lib_init()` depois da config** (`main.cpp:55-59`), não junto do
+  logging. No Windows ele chama `WSAStartup`: não vale subir a pilha de rede num
+  processo que sai por config inválida três linhas depois. O `cleanup` fica no
+  encerramento (`main.cpp:69`), antes do `logging::shutdown()`.
+- **Versão da lib em `debug`** (`mqtt.cpp:19`), não `info` — quem opera não
+  precisa, quem depura precisa.
+- **`src/mqtt/` como subpasta** já nesta tarefa: `client.*` entra ao lado na 2.2,
+  e são dois pares `.h`/`.cpp` no mesmo assunto, que é o critério da 1.1.
+
+**O que o probe mediu — e o que ele custou em MB:**
+
+- **`PkgConfig::MOSQUITTO` não tem `IMPORTED_LOCATION`**, então
+  `TARGET_RUNTIME_DLLS` volta **vazio** pra ele. A suspeita do planejamento se
+  confirmou: a DLL não vem de graça, vai na lista manual
+  (`CMakeLists.txt:126-145`).
+- **A `libmosquitto.dll` (0,14 MB) importa `libssl-3-x64.dll` (0,95 MB) e
+  `libcrypto-3-x64.dll` (5,24 MB)** — `objdump -p` na própria DLL —, **mesmo sem
+  TLS nenhum**. E como o `TARGET_RUNTIME_DLLS` não varre imports de DLL, essas
+  duas seriam manuais mesmo que o alvo do pkg-config fosse completo.
+- **+6,3 MB no diretório de deploy** num projeto que se vende como leve, sem
+  escapatória barata: o pacote do MSYS2 não tem variante sem TLS, e linkar
+  estático (`libmosquitto.a`, 0,19 MB) só trocaria isso por `libcrypto.a` de
+  9,3 MB dentro do `.exe`, contrariando o runtime dinâmico da 1.1.
+- **Armadilha registrada no `CMakeLists.txt:135-137`:** o "3" de
+  `libcrypto-3-x64.dll` é o major do OpenSSL — versão em texto exatamente do tipo
+  que a lista do `TARGET_RUNTIME_DLLS` existe pra evitar. Se o MSYS2 subir pro 4,
+  o build passa e o erro só aparece no boot, como DLL faltando.
+
+**Validado:**
+
+| caso | resultado |
+|---|---|
+| build | 9 alvos, **zero aviso** com `-Werror` |
+| `build/` | 7 DLLs, **9,56 MB** (era 3,25 MB antes da lib) + `.exe` de 3,76 MB |
+| `objdump -p` no `.exe` | ganhou `libmosquitto.dll`, nada mais |
+| rodar com `PATH` **sem** MSYS2 | sobe e loga `libmosquitto 2.0.22` |
+| config inválida | sai antes do `lib_init` — nenhum `WSAStartup` |
+
+### 2.2 — Um cliente por broker: conectar
+`connect_async` + `loop_start`, callbacks e mensagens de erro.
+
+Decisões a tomar:
+- `keepalive`: valor, e se vira chave de `[broker:*]` ou fica constante.
+- `clean_session=true` nesta fase (sem QoS > 0 não há sessão a guardar).
+- **Os callbacks rodam na thread da lib, uma por cliente** — com N brokers, N
+  callbacks simultâneos. Confirmar que nada é compartilhado entre eles.
+- `on_log` como único canal que reporta falha de TCP quando se usa
+  `connect_async` (nem `on_connect` nem `on_disconnect` são chamados): quanto
+  dele vai pro nosso log, e em que nível.
+- Nome e forma do módulo (`src/mqtt/`?), já que serão dois pares `.h`/`.cpp` ou
+  mais.
+
+### 2.3 — Reconexão e supervisão
+O `tick()` que cobre o buraco da primeira conexão.
+
+Decisões a tomar:
+- Retry nosso **só** até a primeira conexão; depois é a lib. Insistir nos dois
+  lugares criaria tentativas concorrentes.
+- Log de estado sem spam: reconectando a cada 60 s por uma noite são ~500 linhas.
+  Uma linha por transição de estado, ou uma a cada N tentativas?
+- O que acontece se **nenhum** broker conectar: sobe assim mesmo (com aviso) ou
+  derruba? A Fase 1 fechou que config inválida derruba o boot, mas broker fora do
+  ar não é config inválida.
+
+### 2.4 — Subscrição e QoS
+Decisões a tomar:
+- **Subscrever a cada (re)conexão**, não uma vez no `start()`: com
+  `clean_session=true` o broker esquece as inscrições quando a conexão cai.
+- A união dos padrões sai das streams do broker, com dedup (duas streams podem
+  declarar o mesmo padrão; o SUBSCRIBE repetido seria inofensivo, mas apareceria
+  duas vezes no log).
+- **QoS 0 nesta fase** — a proposta. QoS 1 sem writer não entrega nada: o
+  "recebi" só significa alguma coisa quando existe disco atrás, e
+  `clean_session=false` só faz sentido junto de QoS > 0. Confirmar e registrar o
+  que fica pra Fase 3/4.
+- Um SUBSCRIBE por padrão ou `subscribe_multiple`?
+
+### 2.5 — Roteamento tópico → stream
+Fan-out e aviso do tópico órfão já estão decididos acima. **Em aberto de
+propósito — decidir quando a tarefa chegar:**
+- **Onde o roteamento mora:** lista imutável de streams por cliente (sem lock,
+  mesmo com N threads da lib) ou roteador compartilhado.
+- **O que a callback entrega:** chamar direto o sink temporário (concreto) ou já
+  desenhar uma interface `on_message(...)`. Argumento pelo concreto: a assinatura
+  certa depende do que o writer da Fase 3 vai querer (registro pronto? payload
+  cru? slot pré-alocado?), e desfazer abstração errada custa mais que trocar o
+  corpo de uma função.
+- **Timestamp de chegada** (`DESIGN.md:69-70`): `system_clock` em ms já nesta
+  fase, ou só quando houver registro pra carimbar.
+
+Ponto técnico que não é decisão: usar `mosquitto_topic_matches_sub` da própria
+lib. Matcher de wildcard escrito à mão erra nos cantos (`+` no meio do nível,
+`#` que não casa `$SYS`).
+
+### 2.6 — Sink temporário e parada
+Decisões a tomar:
+- Sink = contador por stream + linha em `debug`, **sem fila** (a fila entra com o
+  writer, Fase 3). Onde os contadores vivem e com que periodicidade aparecem.
+- `stop()` com a distinção disconnect/force (os ~11 s), ordem no encerramento e o
+  orçamento do handler de console da 1.3 (~5 s menos os 200 ms do polling) —
+  agora com N clientes pra fechar lá dentro.
+- O buffer da mensagem pertence à lib: nesta fase ninguém guarda nada, mas
+  registrar que o `push` da Fase 3 copia, pra não virar ponteiro solto depois.
+
+### 2.7 — Fechamento da fase
+- **Publicador de teste**, que saiu da 1.7: `tools/mosquitto_pub.exe`, com
+  `tools/mosquitto.exe` subindo broker local — testar sem depender da rede nem do
+  broker de casa.
+- Validar: broker no ar; broker fora do ar no boot; broker caindo no meio e
+  voltando; dois brokers; tópico não mapeado; padrão recusado no SUBACK; Ctrl+C e
+  fechar a janela **com clientes conectados** (o encerramento passa a ter
+  trabalho de verdade dentro do handler).
+- Docs + revisão das âncoras `arquivo:linha`, que a Fase 1 mostrou não ser tarefa
+  avulsa.

@@ -148,11 +148,14 @@ sem ambiguidade.
 
 ## 6. Ciclo de vida do processo
 
-Sobe na ordem `logging::init()` → `cmdline::parse()` → `signals::init()` → o
-resto (leitura da config na Fase 1, clientes na 2, writers na 3). O logging vem
-primeiro porque erro de qualquer um dos outros precisa de onde sair. A linha de
-comando é conferida antes dos sinais (`main.cpp:18-22`): argumento errado sai com
-código 1, e nesse ponto não há nada montado pra parar de forma ordenada.
+Sobe na ordem `logging::init()` → `cmdline::parse()` → `config::load()` →
+`mqtt::init()` → `signals::init()` → o resto (clientes na Fase 2, writers na 3).
+O `mqtt::init()` fica depois da config porque no Windows ele chama `WSAStartup`,
+e não vale subir a pilha de rede num processo que sai por config inválida. O
+logging vem primeiro porque erro de qualquer um dos outros precisa de onde sair.
+A linha de comando é conferida antes dos sinais (`main.cpp:18-22`): argumento
+errado sai com código 1, e nesse ponto não há nada montado pra parar de forma
+ordenada.
 
 **Verbosidade:** `-v` liga `debug`, `-vv` liga `trace`, aplicados logo depois do
 `init()` (`main.cpp:25-29`). Sem flag o nível é `info`. É o único jeito de mudar
@@ -185,9 +188,13 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
 
 - **C++17 + STL.** C++20 avaliado e descartado nesta rodada; o toolchain
   suporta, então subir depois continua possível.
-- **MQTT 3.1.1 via mosquitto.** API C (`libmosquitto`) ou wrapper C++
-  (`libmosquittopp`) fica para a Fase 2. Precedente forte pela API C: o wrapper
-  não expõe o `mosquitto*` interno, o que fecha a porta para MQTT 5.
+- **MQTT 3.1.1 via mosquitto, API C (`libmosquitto` 2.0.22)** — o wrapper C++
+  `libmosquittopp` não expõe o `mosquitto*` interno, o que fecharia a porta para
+  MQTT 5. Vem por pkg-config (não há pacote CMake no MSYS2), e o alvo do
+  pkg-config não tem `IMPORTED_LOCATION`: a DLL vai na lista manual de cópia,
+  junto de `libssl-3` e `libcrypto-3`, que a `libmosquitto.dll` importa mesmo
+  sem TLS — **+6,3 MB no diretório de deploy**, sem alternativa barata no
+  pacote do MSYS2.
 - **Logging: spdlog**, assíncrono (ver §2).
 - **MSYS2 ucrt64**, CMake + Ninja. Multiplataforma é objetivo: o código
   específico de SO fica isolado atrás de `#ifdef` em pontos nomeados (parada
@@ -200,8 +207,8 @@ contexto de sinal. Quem anuncia a parada é o `main`, depois do laço.
   o `g++` morre com *exit 1 e nenhum diagnóstico*, o que faz o erro parecer do
   código.
 - **Módulos hoje:** `logging`, `signals`, `cmdline`, `paths`, `config/ini`,
-  `config/config`. Layout plano em `src/`, com subpasta quando o assunto tem
-  mais de um par `.h`/`.cpp`.
+  `config/config`, `mqtt/mqtt`. Layout plano em `src/`, com subpasta quando o
+  assunto tem mais de um par `.h`/`.cpp`.
 
 ---
 

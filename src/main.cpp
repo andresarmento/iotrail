@@ -7,6 +7,7 @@
 #include "cmdline.h"
 #include "config.h"
 #include "logging.h"
+#include "mqtt.h"
 #include "signals.h"
 #include <chrono>
 #include <thread>
@@ -51,6 +52,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // MQTT
+    if (!mqtt::init()) {
+        logging::shutdown();
+        return 1;
+    }
+
     signals::init();
     logging::info("IoTrail subiu, Ctrl+C para encerrar");
 
@@ -59,6 +66,7 @@ int main(int argc, char* argv[]) {
     }
 
     logging::info("IoTrail encerrando");
+    mqtt::shutdown();
     logging::shutdown();
     signals::shutdown_done(); // Deve ser a última linha
     return 0;
