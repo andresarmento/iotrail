@@ -670,7 +670,7 @@ alheio.
 A varredura para por dois motivos diferentes, e eles merecem tratamento
 diferente:
 
-- **Falha de tamanho** — a parte fixa não cabe, ou `pos + 26 + lens` passa do
+- **Falha de tamanho** — a parte fixa não cabe, ou `pos + 28 + payload_len` passa do
   fim do arquivo. É registro cortado no fim, assinatura de *torn write*.
   Truncar é seguro: depois de um registro incompleto não existe dado válido.
 - **Falha de conteúdo** — o corpo está completo, mas o CRC não bate ou os
@@ -698,6 +698,8 @@ por causa de uma é o pior resultado possível.
 
 **Truncar** é operação de plataforma (`_chsize_s` no Windows, `ftruncate` em
 POSIX) e mora no módulo da 3.3, junto do `fsync` — não espalhado em `#ifdef`.
+**[3.3]** É `storage::file::truncate()` em `src/storage/file.cpp:225`; o sync é
+`file::sync()` (`:203`), que no POSIX usa `fdatasync`.
 
 ## 9. Deixado de fora
 

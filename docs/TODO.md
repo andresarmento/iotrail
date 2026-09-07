@@ -10,8 +10,8 @@ longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
 mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Em curso: Fase 3, formato de
 registro e writer — desmembrada em 2026-09-06 (oito tarefas), 3.1 fechada na
-mesma data e o desmembramento revisto para dez. 3.2 fechada em 2026-09-07,
-próxima tarefa: 3.3.
+mesma data e o desmembramento revisto para dez. 3.2 e 3.3 fechadas em
+2026-09-07, próxima tarefa: 3.4.
 
 ---
 
@@ -1223,16 +1223,74 @@ Sobrou uma dívida de nomenclatura: `FORMATO.md` §1 ainda dizia "parte fixa do
 registro (26)", de antes de o tópico sair do registro. Corrigido para 28 na
 mesma leva.
 
-### 3.3 — Camada de plataforma (`fsync`/`truncate`)
-O que a 1.3 adiou nominalmente para esta fase. `#ifdef` em módulo próprio, não
-espalhado.
+### 3.3 — Camada de plataforma (`fsync`/`truncate`) — FECHADO (2026-09-07)
+O que a 1.3 e a 1.4 adiaram (`docs/TODO.md:204-206`, `:283-285`). `src/storage/file.h`
+e `file.cpp`: classe `storage::file`, move-only, mais o `sync_dir()` livre.
+Todo `#ifdef` de arquivo do projeto passa a morar aí.
 
-Decisões a tomar:
-- `FILE*` + `_commit(_fileno(f))` / `fsync(fileno(f))`, ou descritor cru?
-- Criação de diretório fica com `std::filesystem::create_directories` (não
-  precisa de `#ifdef`) — confirmar.
-- **O que fazer quando o `fsync` falha.** `EIO` é o caso em que o dado já se
-  perdeu e o SO está avisando uma vez só.
+**O que precisa de ramo por plataforma é menos do que parecia.** Dos oito verbos
+que os consumidores pedem — abrir, ler, escrever, sincronizar, truncar, tamanho,
+renomear, criar diretório —, só os cinco primeiros têm `#ifdef`. `rename`,
+`exists` e `create_directories` saem de `std::filesystem` e nem entram na classe.
+
+- **Descritor cru, não `FILE*`** — diverge da rodada anterior
+  (`knowledge_base/src/segment_writer.cpp:58-66`). O stdio põe um buffer próprio
+  *na frente* do page cache, então durabilidade vira `fflush` **e depois**
+  `fsync`; esquecer o primeiro não dá erro nem aviso e só aparece como perda de
+  dados depois de uma queda de energia — a classe de bug que este projeto existe
+  para não ter. E o buffer não compraria nada: o writer já monta o registro
+  inteiro na memória antes de gravar, porque o CRC fica no byte 0. Preço pago:
+  `write()` pode retornar curto, então há laço com retry de `EINTR`
+  (`file.cpp:169-198`) em vez de um buffer implícito.
+- **RAII move-only.** A varredura da 3.8 tem seis pontos de saída
+  (`FORMATO.md` §8); com funções livres sobre `int`, cada um teria que lembrar
+  de fechar.
+- **`create_directories` confirmado**, com a sobrecarga de `std::error_code` e
+  não a que lança — é o que `config.cpp:107` já faz.
+- **`fsync` do diretório entra agora, no ramo POSIX** (`file.cpp:245-269`). O
+  conteúdo do arquivo e o *nome* dele são coisas diferentes: `fsync(fd)` persiste
+  os bytes, mas a entrada `casa-00003.log` mora dentro da pasta, que é outro
+  arquivo com páginas sujas próprias. Queda no meio e o boot volta sem o segmento
+  novo, com os bytes já sincronizados. Quem cria o arquivo é quem sincroniza a
+  pasta, e isso ficou **dentro do `open()`** (`file.cpp:113-120`), não como passo
+  que o chamador precisa lembrar — seria reintroduzir o footgun do `fflush` com
+  outro nome. Abre com `O_EXCL` primeiro justamente para saber se foi ele quem
+  criou, sem a janela de um `exists()` antes. No Windows é no-op: o NTFS journala
+  metadado sozinho.
+- **`fdatasync`, não `fsync`, no arquivo** (`file.cpp:212-219`). Num append o
+  único metadado que precisa ir junto do conteúdo é o tamanho novo, e esse o
+  `fdatasync` garante; o que ele pula é `mtime`/`atime`. Mesma garantia, uma
+  escrita de metadado a menos por sync — em cartão SD isso é medível. No
+  diretório é o contrário: lá o metadado *é* o assunto, então `fsync`.
+- **`fsync` que falha: nunca repetir, nunca engolir** (`file.cpp:203-208`). No
+  Linux o erro de writeback é entregue **uma vez** e as páginas sujas já foram
+  descartadas — um segundo `sync` devolve 0 sem que nada tenha ido para o disco.
+  Foi o que derrubou o PostgreSQL em 2018. `EINTR` é outra coisa: ali o sync nem
+  aconteceu, e refazer é o certo. A 3.3 só reporta (`false` + `errno`); a
+  **política** é da 3.7: falha de `sync` **para aquela stream**, reusando a
+  máquina do `.corrupt` do §8, com `error` no log nomeando a faixa de offsets que
+  ficou sem prova. É a resposta que o §8 já escolheu para o edge desatendido — na
+  prática um `EIO` costuma ser o dispositivo inteiro (cartão SD saindo), e as
+  streams vão parando uma a uma. `ENOSPC` **não** ganha tratamento separado: só
+  tem conserto com a retenção da Fase 8, e a 3.7 não tem onde estacionar o dado
+  pendente enquanto espera.
+
+**Duas armadilhas que o código carrega comentário para não perder:**
+`_O_BINARY` no `_wopen` (`file.cpp:42-47`) — sem ele o CRT traduz `
+` em `
+`
+e corrompe todo `0x0A` do payload; e **sem `O_APPEND`** no ramo POSIX
+(`file.cpp:50-55`), porque ele forçaria toda escrita para o fim do arquivo e a
+varredura da 3.8 precisa gravar exatamente em `pos` depois de truncar, além de
+reescrever o header no byte 0 quando o `base_offset` diverge. É `_wopen` e não
+`_open` pelo mesmo motivo da 1.4: caminho acentuado não sobrevive à codepage.
+
+**Testado:** 20 verificações no ramo Windows — criação, `size`, ida e volta de
+bytes com `CR`/`LF`/`NUL` (a prova do `_O_BINARY`), append, `truncate`, leitura
+além do fim, move, reabertura sem zerar, `errno` em diretório inexistente e
+caminho com acento no disco. Todas passam. **O ramo POSIX está escrito e não foi
+compilado** — não há compilador POSIX nesta máquina (nem no subsistema msys, nem
+WSL). Mesma situação do `/proc/self/exe` em `paths.cpp`.
 
 ### 3.4 — O arquivo `.meta`: escrita, leitura e recuperação
 Primeira coisa do projeto que grava e recupera de verdade. `src/storage/meta.*`:
