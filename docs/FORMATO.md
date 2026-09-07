@@ -92,10 +92,16 @@ porque a única exposição é um campo cuja corrupção a leitura corrige (§5)
   portável, não porque alguma plataforma alvo precise de conversão hoje.
 - **Sem padding.** Os tamanhos deste documento são os tamanhos em disco.
 - **Sem alinhamento.** Registros são gravados colados, um após o outro. Nem o
-  header (14 bytes) nem a parte fixa do registro (26) são múltiplos de 8, então
+  header (14 bytes) nem a parte fixa do registro (28) são múltiplos de 8, então
   os campos `uint64` ficam desalinhados no arquivo — isso é intencional e não
-  custa nada enquanto ninguém fizer `mmap` + cast. Como o código monta esses
-  bytes é decisão da 3.2.
+  custa nada enquanto ninguém fizer `mmap` + cast.
+
+  **[3.2] Como o código monta esses bytes:** `struct` com `#pragma pack(push,1)`
+  e `static_assert` no `sizeof`, movida para dentro e para fora do buffer com
+  `memcpy` da struct inteira — nunca cast de ponteiro para dentro do buffer, que
+  é o que traria o desalinhamento de volta como UB. O custo dessa escolha é que
+  a gravação sai na ordem do host e não em LE declarada; `src/storage/format.h`
+  interrompe o build num host big-endian em vez de gravar arquivo que mente.
 - Todos os offsets de byte neste documento são relativos ao início da estrutura
   descrita.
 

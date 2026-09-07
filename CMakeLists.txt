@@ -78,7 +78,7 @@ add_executable(iotrail
 
 # Todo diretorio de fonte entra no include path, entao include e' sempre pelo
 # nome do arquivo ("logging.h"), nunca relativo atravessando pasta.
-target_include_directories(iotrail PRIVATE src src/config src/mqtt)
+target_include_directories(iotrail PRIVATE src src/config src/mqtt src/storage)
 
 target_link_libraries(iotrail PRIVATE spdlog::spdlog PkgConfig::MOSQUITTO)
 

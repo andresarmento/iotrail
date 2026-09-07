@@ -10,7 +10,8 @@ longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
 mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Em curso: Fase 3, formato de
 registro e writer — desmembrada em 2026-09-06 (oito tarefas), 3.1 fechada na
-mesma data e o desmembramento revisto para dez, próxima tarefa: 3.2.
+mesma data e o desmembramento revisto para dez. 3.2 fechada em 2026-09-07,
+próxima tarefa: 3.3.
 
 ---
 
@@ -1172,19 +1173,55 @@ exceção é a última, que mudou o registro: o tópico saiu dele.
 - **Buraco ou sobreposição entre segmentos consecutivos** no catálogo do boot é
   `warn` e nada mais — o programa não tem como saber qual dos dois está certo.
 
-### 3.2 — CRC-32 e primitivas de codificação
-`src/storage/crc32.h` e as funções que põem `uint16`/`uint32`/`uint64`
-little-endian num buffer. É a base comum do `.meta` (§5 da spec) e do registro
-(§4), e a única tarefa da fase que não toca em disco nem em thread.
+### 3.2 — CRC-32 e primitivas de codificação — FECHADO (2026-09-07)
+`src/storage/crc32.h` e `src/storage/format.h`, os dois header-only. Única
+tarefa da fase que não toca em disco nem em thread. Entrou também
+`src/storage` no include path (`CMakeLists.txt:81`).
 
-O teste é direto: os mesmos bytes conferidos contra `zlib.crc32` e contra o
-leitor de referência (`FORMATO.md` §10).
+- **`memcpy` de `struct` empacotada, não `put_u16/u32/u64` por deslocamento.**
+  A pergunta era se o `#pragma pack` resolvia o desalinhamento. Resolve metade:
+  mata o padding *dentro* da struct (é o que o `static_assert(sizeof(...))`
+  prova), mas não muda o campo cair em endereço ímpar dentro do buffer — a
+  entrada de tópico do `.meta` tem 10 bytes fixos, então a segunda entrada
+  desalinha todos os `uint32` dela. **Quem resolve essa metade é o `memcpy` da
+  struct inteira para uma local alinhada**, como em
+  `knowledge_base/src/segment_writer.cpp:178`; nunca cast de ponteiro para
+  dentro do buffer. O contra clássico — `&campo` de membro empacotado — não
+  passa aqui: `-Wall -Wextra -Werror` (`CMakeLists.txt:96`) transforma
+  `-Waddress-of-packed-member` em erro de compilação.
+- **O custo aceito: a little-endian de `FORMATO.md` §1 deixa de ser
+  implementada.** `memcpy` grava na ordem do host. Em x86 e ARM as duas
+  coincidem — é o motivo da escolha, zero conversão — e num host big-endian
+  sairia segmento em BE com header dizendo LE, ilegível sem nenhum aviso. Daí o
+  `#error` de `src/storage/format.h`: o build para em vez de gravar arquivo que
+  mente, e o conserto (trocar os `memcpy` por put/get de byte) fica localizado
+  para o dia em que alguém compilar num MIPS de roteador. As structs em si são
+  da 3.4/3.5 — aqui ficou só a constante e o guard.
+- **Tabela de 256 entradas `constexpr`.** A nota que dizia "a rodada anterior
+  usou tabela estática" estava errada: `knowledge_base/src/crc32.h:25-37` já
+  gerava por `constexpr`. Sem custo de inicialização no boot, sem `.cpp` só pra
+  hospedar um array. Nomes sem o prefixo `k` (`crc32_table`, `crc32_update`).
+- **A forma incremental fica, e não é código morto.** O writer monta o registro
+  inteiro num buffer antes de gravar (o CRC está no byte 0, tem que existir
+  antes da escrita), então ele usa a forma de buffer único. Quem usa o
+  encadeamento é a varredura da 3.8: lê a parte fixa primeiro, porque é de lá
+  que sai o `payload_len`, e só depois o payload — encadear evita concatenar até
+  1 MiB num buffer novo só pra conferir o CRC.
+- **O teste é `static_assert`, não executável.** O valor de conferência canônico
+  do CRC-32/ISO-HDLC (`crc32("123456789") == 0xCBF43926`) é avaliado pelo
+  compilador em todo build (`src/storage/crc32.h:72-74`). Errar polinômio, valor
+  inicial ou inversão reprova o build, sem framework de teste — que continua
+  fora do projeto. Conferido também contra `zlib.crc32` do Python em quatro
+  entradas, incluindo buffer vazio e o encadeamento `"1234"`+`"56789"`.
+- **Sem `namespace detail`.** A tabela e o `make_crc32_table()` ficaram planos em
+  `storage`. O `detail` veio junto da rodada anterior, onde `crc32_detail`
+  (`knowledge_base/src/crc32.h:21`) existia por não haver namespace nenhum em
+  volta; aqui já há, nenhum outro header do projeto usa `detail`, e ele obrigava
+  a reabrir o namespace no fim do arquivo só para hospedar um `static_assert`.
 
-Decisões a tomar:
-- Tabela de 256 entradas gerada em tempo de compilação (`constexpr`) ou estática
-  no header? A rodada anterior usou tabela estática.
-- As primitivas viram funções livres num header só, ou um `writer` de buffer com
-  posição interna?
+Sobrou uma dívida de nomenclatura: `FORMATO.md` §1 ainda dizia "parte fixa do
+registro (26)", de antes de o tópico sair do registro. Corrigido para 28 na
+mesma leva.
 
 ### 3.3 — Camada de plataforma (`fsync`/`truncate`)
 O que a 1.3 adiou nominalmente para esta fase. `#ifdef` em módulo próprio, não
