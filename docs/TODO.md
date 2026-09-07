@@ -8,8 +8,9 @@ Cada tarefa fechada vira registro: o que ficou decidido e por quê. O raciocíni
 longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 
 **Estado:** Fase 1 **fechada** em 2026-09-05 (1.1 a 1.7). Fase 2 desmembrada na
-mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Próxima: Fase 3, formato de
-registro e writer — desmembrada em 2026-09-06, próxima tarefa: 3.1.
+mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Em curso: Fase 3, formato de
+registro e writer — desmembrada em 2026-09-06 (oito tarefas), 3.1 fechada na
+mesma data e o desmembramento revisto para dez, próxima tarefa: 3.2.
 
 ---
 
@@ -1069,19 +1070,26 @@ separava "formato" de "escrita em segmentos + rollover + durabilidade"; agora:
 
 O motivo: o formato **não se valida sem escrever e ler de verdade**, e um writer
 sem `fsync` nem recuperação não é testável como durável — seria fechar a fase
-mais cara do projeto sem evidência. O preço é uma fase maior, daí as oito
+mais cara do projeto sem evidência. O preço é uma fase maior, daí o número de
 tarefas.
 
 **Fora desta fase, de propósito:** rollover (4), índice (5), replay (6).
 
+**Desmembrada de novo em 2026-09-06**, depois da 3.1: a tarefa do `.meta` entrou
+como 3.4 e empurrou as seguintes. Motivo: o `.meta` é a menor fatia vertical do
+sistema — grava, sincroniza, trunca e recupera — e prova CRC, plataforma e
+recuperação antes de essas peças irem para o caminho quente do segmento. Dez
+tarefas, mesma fronteira com a Fase 4.
+
 ### Herdado da base de conhecimento — não redecidir sem motivo
 
-- **A especificação já existe e está madura:**
-  `knowledge_base/docs/formato_segmento.md` (294 linhas, `format_version = 1`,
-  marcada como provisória). Header de 14 bytes, registro de 26 bytes fixos +
-  tópico + payload, CRC-32 IEEE cobrindo do byte 4 ao fim do payload,
-  little-endian, sem padding, mais o algoritmo de recuperação (§7) e um **leitor
-  de referência em Python** (§9).
+- **A especificação já existe e está madura.** Migrada e revista na 3.1: agora é
+  `docs/FORMATO.md` (`format_version = 1`), e o original
+  `knowledge_base/docs/formato_segmento.md` não é mais consultado. Header de
+  segmento de 14 bytes, registro de 28 bytes fixos + payload, tópicos no `.meta`
+  da stream, CRC-32 IEEE cobrindo do byte 4 ao fim, little-endian, sem padding,
+  mais os algoritmos de recuperação (§5 e §8) e um **leitor de referência em
+  Python** (§10).
 - **`write()` é barato; o timer que importa é o do `fsync`**
   (`knowledge_base/docs/decisao_sync_write.txt`). Batelar escrita não compra
   throughput na escala do IoTrail — a fila não existe por desempenho, existe por
@@ -1100,44 +1108,83 @@ tarefas.
   (324 linhas) — fila `deque` + mutex, uma thread, recuperação no construtor,
   registro montado em buffer e gravado num `fwrite` só.
 
-### 3.1 — O formato: revisão e migração para `docs/`
+### 3.1 — O formato: revisão e migração — FECHADO (2026-09-06), **sem código**
 
-**Esta tarefa é uma conversa antes de ser código** (decidido no planejamento): a
-especificação vale para as Fases 3 a 8 inteiras e é a coisa mais cara de mudar
-depois, então ela é discutida ponto a ponto antes de virar `docs/`.
+A spec virou `docs/FORMATO.md`, revista ponto a ponto antes de virar código. As
+âncoras para o código da rodada anterior foram trocadas pelas do projeto novo
+(`src/config/config.cpp:63` e `:72` para a validação de nome, `:330-336` para o
+`data_dir`, `src/mqtt/client.cpp:170` para o `arrived_ms`), e os nomes de
+constantes perderam o prefixo `k`. `docs/DESIGN.md` §4 aponta para o doc novo.
 
-Pauta da revisão:
-- **`format_version` continua 1?** A spec se declara provisória e prevê promover
-  a 2 depois de rodar com volume real.
-- **Os limites do §5:** tópico 1024, payload 1 MiB, segmento 64 MiB. O de
-  segmento é o que mais encosta no alvo edge — 64 MiB por segmento num cartão SD
-  com poucos GB, vezes N streams.
-- **Os cortes do §8** (sem `length`, `flags`, `header_len`, `reserved`,
-  `header_crc32`, `created_ms`, nome da stream): todos conscientes, mas vale
-  reconferir o `header_crc32` — o header é gravado uma vez na criação, e a spec
-  assume que ele é sincronizado ali; se não for, ele também tem exposição a
-  torn write.
-- **A janela conhecida:** `topic_len` e `payload_len` são usados **antes** de o
-  CRC poder validá-los (são eles que dizem quantos bytes ler). Os limites do §5
-  existem pra fechar essa janela. Confirmar que basta.
-- **Fan-out e duplicação:** a mesma mensagem em N streams vira N registros, cada
-  um com seu offset. É o desenho, mas é a hora de olhar o custo em disco.
-- **O que muda na migração:** referências ao código da rodada anterior
-  (`loadConfigs()`, `src/segment_writer.cpp:26-35`), nomes de constantes no
-  estilo do projeto (sem prefixo `k`), e o fato de a validação de nome de stream
-  já estar feita (1.6, `config.cpp`).
+As decisões abaixo são quase todas de política de escrita e de recuperação — o
+que valeu a conversa foi o §8, que tinha um caminho de perda total de dados. A
+exceção é a última, que mudou o registro: o tópico saiu dele.
 
-### 3.2 — Registro: structs, CRC-32 e codificação (sem I/O)
-`src/storage/record.*` e `crc32.h`. Deve ser possível gerar os bytes de um
-registro e conferi-los contra o leitor Python sem tocar em disco.
+- **`format_version` continua 1.** Nada nunca foi gravado por este binário, então
+  não existe arquivo v1 que precise continuar legível — mudança agora custa zero,
+  e é por isso que a revisão aconteceu antes do writer e não depois.
+- **Limites em duas categorias.** Do formato (constantes, só mudam com bump):
+  `max_topic_len` 1024, `payload_hard_max` 1 MiB. Do writer (config `[general]`):
+  `max_payload_len` 64 KiB, `segment_max_bytes` 8 MiB. **Juntar os dois papéis
+  num valor configurável abria perda de dados:** sobe-se a chave, gravam-se
+  registros grandes, baixa-se de volta, e a varredura chama registro legítimo de
+  corrupção e trunca o segmento. Coerência entre as duas, validada no boot:
+  `28 + max_payload_len <= segment_max_bytes`.
+- **`segment_max_bytes` 8 MiB, não 64 MiB.** Segmento ativo não é apagável pela
+  retenção; a 64 MiB uma stream lenta segura o mesmo arquivo aberto por mais de
+  um ano. Rollover por idade fica marcado para a Fase 4 — é a solução de verdade.
+- **`max_payload_len` 64 KiB**, e não 1 KiB, porque o limite é de rede MQTT e não
+  de sensor: `bridge/devices` do zigbee2mqtt, discovery do Home Assistant e
+  ESP32-CAM passam de 1 KiB com folga. Errar para cima custa RAM que ninguém usa;
+  errar para baixo custa histórico que não volta. Acima do limite: descarta,
+  `warn` com tópico/tamanho/teto, contador por stream, checado no `on_message`
+  antes do fan-out.
+- **`t_len == 0` é corrupção; `payload_len == 0` é gravado** (payload vazio é
+  mensagem MQTT legítima — é como se apaga um retained).
+- **O primeiro registro válido é a autoridade sobre o `base_offset`**, não o
+  contrário. O `offset` do registro é coberto pelo CRC; os 8 bytes do header não
+  são cobertos por nada. Na spec antiga, `base_offset` corrompido reprovava o
+  primeiro registro, a varredura parava em `pos = 14` e **o segmento inteiro era
+  truncado para o header**. Divergência agora é `warn` + header reescrito e
+  sincronizado. `header_crc32` continua fora: ele detectaria sem resolver, e a
+  resposta seria a mesma — perguntar ao primeiro registro.
+- **Truncar só em falha de tamanho.** Falha de conteúdo (corpo completo, CRC ruim
+  ou campos absurdos) preserva o arquivo como `.corrupt` e **para aquela stream**,
+  as outras seguem. Abrir segmento novo reusaria os offsets que estão dentro do
+  `.corrupt`, e a Fase 7 chaveia cursor de consumidor por offset — um consumidor
+  parado em 500 leria outro registro sem nenhum sinal.
+- **Fan-out documentado** no `iotrail.conf`, comentário de `topics`: streams com
+  padrões sobrepostos gravam a mensagem uma vez cada.
+- **O tópico saiu do registro** (decidido depois dos seis pontos, mesma data).
+  Era 37% do registro na medição de 2026-08-29 (`topic_len` 19 contra
+  `payload_len` 7) e se repetia em toda mensagem. Agora mora em
+  `data/<stream>/<stream>.meta` e o registro guarda `topic_id`: de
+  `26 + topic + payload` para `28 + payload`, -17% no caso do exemplo do doc.
+  O `.meta` tem header próprio (`magic "IOTM"`, `format_version`, `header_len`,
+  `next_topic_id`) seguido da tabela de tópicos append-only. A ideia estava em
+  `knowledge_base/claude_memory/TODO.md:383-437` como candidata ao
+  `format_version` 2 — entrou na v1 porque nada foi gravado ainda.
+  **`topic_id` é explícito, `uint32` e nunca reusado**, senão uma limpeza que
+  remova entradas faria registro antigo apontar para outro tópico; `header_len`
+  é o que permite a v2 acrescentar campos de stream sem quebrar leitor antigo.
+  Broker e padrões subscritos ficaram **fora**: vivem no `iotrail.conf`, que é
+  fonte viva, e espelho de config no disco envelhece e passa a mentir.
+- **Buraco ou sobreposição entre segmentos consecutivos** no catálogo do boot é
+  `warn` e nada mais — o programa não tem como saber qual dos dois está certo.
+
+### 3.2 — CRC-32 e primitivas de codificação
+`src/storage/crc32.h` e as funções que põem `uint16`/`uint32`/`uint64`
+little-endian num buffer. É a base comum do `.meta` (§5 da spec) e do registro
+(§4), e a única tarefa da fase que não toca em disco nem em thread.
+
+O teste é direto: os mesmos bytes conferidos contra `zlib.crc32` e contra o
+leitor de referência (`FORMATO.md` §10).
 
 Decisões a tomar:
-- `#pragma pack` + `static_assert` (como a rodada anterior) ou serialização
-  campo a campo? Packed struct é prática comum, mas ponteiro para membro
-  desalinhado é UB — e o `-Werror` do projeto pode ter opinião.
-- Onde vive o buffer de montagem: um por writer, reutilizado, pra não alocar por
-  mensagem no caminho quente.
-- Os limites do §5 são checados aqui ou no `push`?
+- Tabela de 256 entradas gerada em tempo de compilação (`constexpr`) ou estática
+  no header? A rodada anterior usou tabela estática.
+- As primitivas viram funções livres num header só, ou um `writer` de buffer com
+  posição interna?
 
 ### 3.3 — Camada de plataforma (`fsync`/`truncate`)
 O que a 1.3 adiou nominalmente para esta fase. `#ifdef` em módulo próprio, não
@@ -1150,17 +1197,68 @@ Decisões a tomar:
 - **O que fazer quando o `fsync` falha.** `EIO` é o caso em que o dado já se
   perdeu e o SO está avisando uma vez só.
 
-### 3.4 — Escrita do segmento: header + append
+### 3.4 — O arquivo `.meta`: escrita, leitura e recuperação
+Primeira coisa do projeto que grava e recupera de verdade. `src/storage/meta.*`:
+header de 12 bytes, tabela de tópicos append-only, varredura no boot com
+truncagem do rabo, e a tabela em memória (`FORMATO.md` §5).
+
+**É uma fatia vertical de propósito** — exercita CRC-32 (3.2), `fsync` e
+`truncate` (3.3) e recuperação de rabo num arquivo de dezenas de bytes, antes de
+as mesmas peças irem para o caminho quente do segmento.
+
+**Tem consumidor real desde o primeiro dia:** o `on_message` já casa tópico com
+stream (`src/mqtt/client.cpp:188`) e hoje só loga. Ligando a tabela ali, cada
+mensagem resolve ou insere o tópico e o `.meta` cresce contra o broker de casa.
+Não é andaime: é a mesma tabela que o `push` vai consultar na 3.7.
+
+Decisões a tomar:
+- **Quando o `.meta` é criado:** no boot, para toda stream da config, ou na
+  primeira mensagem que chega? Criar no boot deixa pasta e arquivo prontos e
+  falha cedo se o disco não deixa escrever; criar sob demanda não cria lixo para
+  stream que nunca recebe nada.
+- **`.meta` ausente com segmentos presentes** — apagado à mão ou perdido: os
+  `topic_id` viram órfãos (§4 diz que o registro sobrevive). Recriar vazio e
+  seguir, ou parar a stream e deixar o operador decidir?
+- **Concorrência:** a tabela é lida por N callbacks do MQTT e escrita quando
+  aparece tópico novo. Lock por stream, ou estrutura imutável trocada por
+  ponteiro? A `streams_` da 2.5 já resolveu um caso parecido sem lock por ser
+  imutável desde a construção.
+- Índice inverso `topic → id` para o caminho de recebimento, junto do
+  `id → topic` que a leitura usa.
+
+### 3.5 — Registro: structs e codificação (sem I/O)
+`src/storage/record.*`, sobre as primitivas da 3.2. Deve ser possível gerar os
+bytes de um registro e conferi-los contra o leitor Python sem tocar em disco. O
+`topic_id` já vem resolvido pela tabela da 3.4.
+
+Decisões a tomar:
+- `#pragma pack` + `static_assert` (como a rodada anterior) ou serialização
+  campo a campo? Packed struct é prática comum, mas ponteiro para membro
+  desalinhado é UB — e o `-Werror` do projeto pode ter opinião.
+- Onde vive o buffer de montagem: um por writer, reutilizado, pra não alocar por
+  mensagem no caminho quente.
+- Os limites do §5 são checados aqui ou no `push`?
+- Fechado na 3.1: `payload_len == 0` é gravado, e com `payloadlen == 0` a
+  mosquitto entrega `msg->payload` nulo — o `push` não pode fazer `memcpy` cego.
+- A entrada da tabela de tópicos (10 B fixos + tópico) já foi escrita na 3.4:
+  mesmo CRC, mesma regra de faixa. Se as duas não puderem compartilhar as mesmas
+  primitivas, alguma das duas está torta.
+
+### 3.6 — Escrita do segmento: header + append
 Decisões a tomar (ficam para quando a tarefa chegar):
 - `FILE*` com buffer da libc ou `write()` direto.
 - Um `fwrite` por registro montado em buffer — a rodada anterior fez assim, e o
   motivo é bom: o CRC precisa do registro pronto antes de gravar, e uma escrita
   única cria menos fronteiras de escrita parcial.
 - Quando o header de 14 bytes é sincronizado.
+- **A entrada nova no `.meta` é gravada e sincronizada antes** do primeiro
+  registro que usa o `topic_id` (`FORMATO.md` §5). Só quando aparece tópico
+  novo; em regime, nunca. É o único `fsync` fora do `sync_interval`.
+- Atualizar `next_topic_id` no header do `.meta` na mesma ocasião.
 - **Falha de escrita (disco cheio):** parar aquela stream, derrubar o processo,
   ou contar e seguir perdendo? É decisão de perda de dado, não de código.
 
-### 3.5 — Fila e writer thread por stream
+### 3.7 — Fila e writer thread por stream
 Decisões a tomar (ficam para quando a tarefa chegar):
 - Polling ou `condition_variable`: o polling custa até 2× `write_interval` no
   encerramento, o que compete com o orçamento do handler da 1.3.
@@ -1172,15 +1270,20 @@ Decisões a tomar (ficam para quando a tarefa chegar):
   quando a callback do MQTT retorna (dívida registrada na 2.6,
   `client.cpp:174-178`).
 
-### 3.6 — Recuperação no boot
-Implementar o §7 da spec: varredura do último segmento, descarte do rabo
-corrompido, truncagem, retomada do contador de offset.
+### 3.8 — Recuperação do segmento no boot
+Implementar o §8 da spec: varredura do último segmento, descarte do rabo
+corrompido, truncagem, retomada do contador de offset. A recuperação do `.meta`
+já saiu na 3.4 — aqui é a do segmento, com o mesmo critério de falha de tamanho
+contra falha de conteúdo.
 
 Decisões a tomar:
 - `magic`/`format_version` errados derrubam **aquela stream** ou o processo?
+- Ordem no boot: o `.meta` é lido antes do segmento (o segmento sozinho não
+  resolve `topic_id`), mas registro com id desconhecido **não** é descartado
+  (§4).
 - Quanto vai pro log: bytes truncados, offset retomado, tempo da varredura.
 
-### 3.7 — Encerramento com writers, dentro do orçamento
+### 3.9 — Encerramento com writers, dentro do orçamento
 A restrição que a 1.3 deixou anotada: drenar M filas e fazer M `fsync` **dentro
 do handler de console**, com ~5 s do SO menos os 200 ms do laço.
 
@@ -1192,10 +1295,10 @@ Decisões a tomar:
 - Medir contra a linha de base da 2.7: hoje o encerramento com 2 clientes
   conectados leva **menos de 1 ms**.
 
-### 3.8 — Fechamento da fase
-- **Validação cruzada com o leitor Python** (§9 da spec) sobre arquivos gerados
-  pelo C++. É o teste que prova que o formato é o que o documento diz, e não "o
-  que o writer faz".
+### 3.10 — Fechamento da fase
+- **Validação cruzada com o leitor Python** (§10 da spec) sobre `.log` e `.meta`
+  gerados pelo C++. É o teste que prova que o formato é o que o documento diz, e
+  não "o que o writer faz".
 - **Teste de queda:** matar o processo à força durante escrita e conferir
   recuperação e truncagem no boot seguinte.
 - **Medições:** latência chegada→disco, custo do `fsync`, e **bytes escritos por

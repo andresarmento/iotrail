@@ -74,10 +74,11 @@ contador de offset, começando em 0.**
 
 ## 4. Persistência
 
-Especificação byte a byte: `knowledge_base/docs/formato_segmento.md`
-(`format_version = 1`, provisória). Ela é a fonte de verdade para o writer em
-C++ e para o leitor em Python — as duas implementações têm que bater com o
-documento. **Migra para `docs/` na Fase 3**, quando o writer for escrito.
+Especificação byte a byte: **`docs/FORMATO.md`** (`format_version = 1`). Ela é a
+fonte de verdade para o writer em C++ e para o leitor em Python — as duas
+implementações têm que bater com o documento. Migrada da base de conhecimento e
+revista na tarefa 3.1; o original (`knowledge_base/docs/formato_segmento.md`)
+não é mais consultado.
 
 Resumo do que está decidido:
 
@@ -85,18 +86,36 @@ Resumo do que está decidido:
   arquivo: `data/vibracao/vibracao-00000.log`. Layout plano foi descartado — a retenção
   apagaria segmentos da stream errada quando um nome fosse prefixo de outro
   (`temperatura` e `temperatura-externa`).
+- **Dois arquivos por stream:** os segmentos (`.log`) e o `<stream>.meta`, com
+  header de campos da stream (`magic "IOTM"`, `format_version`, `header_len`,
+  `next_topic_id`) e a tabela de tópicos append-only. Na Fase 5 entra o terceiro,
+  `.idx` por segmento — que é cache derivável, enquanto o `.meta` é dado.
 - **Header de 14 bytes** por segmento: `magic "IOTR"`, `format_version`,
   `base_offset`.
-- **Registro:** 26 bytes fixos (`crc32`, `offset`, `timestamp_ms`, `topic_len`,
-  `payload_len`) + tópico + payload.
+- **Registro:** 28 bytes fixos (`crc32`, `offset`, `timestamp_ms`, `topic_id`,
+  `payload_len`) + payload. **O tópico não vai no registro** — era 37% dele na
+  medição de 2026-08-29, repetido em toda mensagem; agora é uma entrada no
+  `.meta` e o registro guarda só o id, que é `uint32` e nunca reusado. O preço é
+  o segmento não se explicar mais sozinho sem o `.meta` ao lado.
 - **CRC-32 IEEE** cobrindo do byte 4 ao fim do payload — tudo menos o próprio
   CRC. Faixa contígua, e protege o `offset`, que é a pior corrupção possível
   (índice e cursores de consumidor são chaveados por ele).
 - **Little-endian explícito, sem padding, sem alinhamento.**
-- **Rollover por tamanho apenas.** Por tempo foi descartado.
+- **Rollover por tamanho apenas.** Por tempo foi descartado na v1, mas volta à
+  mesa na Fase 4: com `segment_max_bytes` de 8 MiB, uma stream lenta demora
+  meses para fechar o primeiro segmento, e a retenção só apaga segmento fechado.
+- **Limites em duas categorias:** `max_topic_len` (1024) e `payload_hard_max`
+  (1 MiB) são do formato e só mudam com bump de versão; `max_payload_len`
+  (64 KiB) e `segment_max_bytes` (8 MiB) são config do `[general]`. Misturar os
+  dois papéis num valor configurável faria baixar a chave apagar dado já
+  gravado.
 - **Recuperação no boot:** só o último segmento precisa de varredura — os
   anteriores foram fechados com sync no rollover. A varredura acha o fim da
-  parte íntegra (torn write) e trunca ali.
+  parte íntegra (torn write) e trunca ali. O **primeiro registro válido é a
+  autoridade** sobre o `base_offset`, não o contrário: o offset dele é coberto
+  pelo CRC, o do header não é coberto por nada. E trunca só em falha de
+  tamanho — falha de conteúdo preserva o arquivo como `.corrupt` e para aquela
+  stream, para não reusar offset.
 
 ---
 
