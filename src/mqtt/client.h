@@ -16,12 +16,23 @@
 struct mosquitto;
 struct mosquitto_message;
 
+namespace storage {
+    class meta;
+}
+
 namespace mqtt {
     class client {
       public:
-        // As streams sao as deste broker. Ponteiros pra dentro do settings, que
-        // vive no main e sobrevive aos clientes.
-        client(config::broker broker, std::vector<const config::stream*> streams);
+        // Uma stream deste broker e a tabela de topicos dela. Os dois vivem no
+        // main e sobrevivem aos clientes; o par vem montado de la, do boot, pra
+        // que o caminho de recebimento nao tenha busca nenhuma pra fazer - com
+        // a tabela achada por nome, cada mensagem pagaria um hash de string.
+        struct target {
+            const config::stream* cfg;
+            storage::meta* meta;
+        };
+
+        client(config::broker broker, std::vector<target> streams);
         ~client();
 
         client(const client&) = delete;
@@ -40,7 +51,7 @@ namespace mqtt {
 
         mosquitto* mosq_ = nullptr;
         const config::broker broker_;
-        const std::vector<const config::stream*> streams_;
+        const std::vector<target> streams_;
 
         // mid do SUBSCRIBE -> padrao pedido, pra dizer no log QUAL inscricao o
         // broker recusou. So a thread da lib toca: on_connect e on_subscribe

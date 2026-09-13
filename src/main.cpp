@@ -4,16 +4,19 @@
  *  Copyright André Sarmento - 2026
  */
 
+#include <vector>
+#include <thread>
+#include <memory>
+#include <chrono>
+
+#include "logging.h"
 #include "client.h"
 #include "cmdline.h"
 #include "config.h"
-#include "logging.h"
+#include "meta.h"
 #include "mqtt.h"
 #include "signals.h"
-#include <chrono>
-#include <memory>
-#include <thread>
-#include <vector>
+
 
 int main(int argc, char* argv[]) {
     logging::init();
@@ -56,6 +59,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Tabelas de topicos, uma por stream, abertas ANTES de conectar em broker
+    // nenhum: criar pasta, arquivo e sync_dir e' a operacao mais lenta do
+    // modulo, e sob demanda ela cairia dentro do on_message. Num edge
+    // desatendido, descobrir no boot que o disco nao deixa escrever vale mais
+    // que descobrir as 3h, com a primeira mensagem na mao.
+    //
+    // Vetor paralelo a settings->streams - mesma ordem, mesmo indice. unique_ptr
+    // porque o meta segura um descritor e nao e' movivel, e nulo marca a stream
+    // que nao abriu. Declarado aqui, antes dos clientes, pra ser destruido
+    // depois deles.
+    std::vector<std::unique_ptr<storage::meta>> metas;
+    metas.reserve(settings->streams.size());
+    for (const auto& st : settings->streams) {
+        auto m = std::make_unique<storage::meta>();
+        if (!m->open(settings->data_dir, st.name)) m.reset();  // o motivo ja foi logado
+        metas.push_back(std::move(m));
+    }
+
     // Setup MQTT clients
     if (!mqtt::init()) {
         logging::shutdown();
@@ -64,11 +85,22 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::unique_ptr<mqtt::client>> clients;
     for (const auto& br : settings->brokers) {
-        // Obtem as streams para o broker em questão
-        std::vector<const config::stream*> streams;
-        for (const auto& st : settings->streams) {
-            if (st.broker == br.name) streams.push_back(&st);
+        // Obtem as streams para o broker em questão, cada uma com a tabela de
+        // topicos dela ao lado. A stream cujo .meta nao abriu fica de fora: sem
+        // tabela nao ha como gravar, e subscrever pra descartar gastaria banda
+        // e log sem guardar nada.
+        std::vector<mqtt::client::target> streams;
+        for (size_t i = 0; i < settings->streams.size(); ++i) {
+            const config::stream& st = settings->streams[i];
+            if (st.broker != br.name || !metas[i]) continue;
+            streams.push_back({&st, metas[i].get()});
         }
+
+        if (streams.empty()) {
+            logging::warn("[mqtt/{}] nenhuma stream gravavel - cliente nao sobe", br.name);
+            continue;
+        }
+
         clients.push_back(std::make_unique<mqtt::client>(br, std::move(streams)));
         if (!clients.back()->start()) {
             clients.clear();
@@ -76,6 +108,16 @@ int main(int argc, char* argv[]) {
             logging::shutdown();
             return 1;
         }
+    }
+
+    // Sem cliente nenhum nao ha o que receber: e' o caso de toda stream ter
+    // falhado ao abrir, e ficar de pe so pra dormir 200 ms em loop esconderia
+    // isso do operador.
+    if (clients.empty()) {
+        logging::error("nenhum cliente subiu - nada a fazer");
+        mqtt::shutdown();
+        logging::shutdown();
+        return 1;
     }
 
     // Setup signals

@@ -14,11 +14,10 @@ namespace logging {
         spdlog::init_thread_pool(queue_size, worker_threads);
         auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
 
-
         auto logger = std::make_shared<spdlog::async_logger>(
             "iotrail", std::move(sink), spdlog::thread_pool(),
-            spdlog::async_overflow_policy::overrun_oldest);    // policy antiga: spdlog::async_overflow_policy::block
-
+            spdlog::async_overflow_policy::overrun_oldest);  
+            
         logger->set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
         logger->set_level(spdlog::level::info);
         logger->flush_on(spdlog::level::trace);

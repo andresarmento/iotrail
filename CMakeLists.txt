@@ -73,6 +73,7 @@ add_executable(iotrail
     src/config/config.cpp
     src/config/ini.cpp
     src/storage/file.cpp
+    src/storage/meta.cpp
     src/paths.cpp
     src/signals.cpp
 )

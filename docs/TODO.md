@@ -11,7 +11,8 @@ longo mora em comentário junto da linha que o implementa; aqui fica o resumo.
 mesma data e **fechada** em 2026-09-06 (2.1 a 2.7). Em curso: Fase 3, formato de
 registro e writer — desmembrada em 2026-09-06 (oito tarefas), 3.1 fechada na
 mesma data e o desmembramento revisto para dez. 3.2 e 3.3 fechadas em
-2026-09-07, próxima tarefa: 3.4.
+2026-09-07 e 3.4 em 2026-09-12, esta última já ligada no caminho real de
+recebimento. Próxima tarefa: 3.5.
 
 ---
 
@@ -1277,7 +1278,8 @@ renomear, criar diretório —, só os cinco primeiros têm `#ifdef`. `rename`,
 
 **Duas armadilhas que o código carrega comentário para não perder:**
 `_O_BINARY` no `_wopen` (`file.cpp:42-47`) — sem ele o CRT traduz `
-` em `
+` em `
+
 `
 e corrompe todo `0x0A` do payload; e **sem `O_APPEND`** no ramo POSIX
 (`file.cpp:50-55`), porque ele forçaria toda escrita para o fim do arquivo e a
@@ -1302,24 +1304,98 @@ truncagem do rabo, e a tabela em memória (`FORMATO.md` §5).
 as mesmas peças irem para o caminho quente do segmento.
 
 **Tem consumidor real desde o primeiro dia:** o `on_message` já casa tópico com
-stream (`src/mqtt/client.cpp:188`) e hoje só loga. Ligando a tabela ali, cada
+stream (`src/mqtt/client.cpp:193`) e hoje só loga. Ligando a tabela ali, cada
 mensagem resolve ou insere o tópico e o `.meta` cresce contra o broker de casa.
 Não é andaime: é a mesma tabela que o `push` vai consultar na 3.7.
 
-Decisões a tomar:
-- **Quando o `.meta` é criado:** no boot, para toda stream da config, ou na
-  primeira mensagem que chega? Criar no boot deixa pasta e arquivo prontos e
-  falha cedo se o disco não deixa escrever; criar sob demanda não cria lixo para
-  stream que nunca recebe nada.
-- **`.meta` ausente com segmentos presentes** — apagado à mão ou perdido: os
-  `topic_id` viram órfãos (§4 diz que o registro sobrevive). Recriar vazio e
-  seguir, ou parar a stream e deixar o operador decidir?
-- **Concorrência:** a tabela é lida por N callbacks do MQTT e escrita quando
-  aparece tópico novo. Lock por stream, ou estrutura imutável trocada por
-  ponteiro? A `streams_` da 2.5 já resolveu um caso parecido sem lock por ser
-  imutável desde a construção.
-- Índice inverso `topic → id` para o caminho de recebimento, junto do
-  `id → topic` que a leitura usa.
+**Decisões fechadas em 2026-09-07**, antes do código:
+
+- **O `.meta` nasce no boot**, para toda stream da config. Num edge desatendido,
+  descobrir às 3h que o disco não deixa escrever vale menos que descobrir no boot
+  com o operador olhando; criar pasta + arquivo + `sync_dir` é a operação mais
+  lenta do módulo e sob demanda ela cairia dentro do `on_message`; e a varredura
+  fica sem ramo "existe ou não". O "lixo" é um arquivo de 12 bytes por stream que
+  o operador escreveu na config.
+- **`.meta` ausente com segmentos presentes: para a stream** (`meta.cpp:88-100`).
+  Recriar vazio parece inofensivo até olhar os ids — o arquivo novo começa com
+  `next_topic_id = 0`, então o próximo tópico recebe 0, 1, 2… que **já são de
+  outros tópicos** nos segmentos velhos, e um registro do mês passado passaria a
+  resolver para o nome errado, em silêncio. O caso "`topic_id` desconhecido" do
+  §4 é bem melhor que isso. O meio-termo (recriar com `next_topic_id` acima de
+  qualquer id nos segmentos) exigiria varrer **todos** os segmentos da stream, e
+  o §8 só varre o último — custo desproporcional para um caso que só acontece
+  com intervenção manual.
+- **Sem lock, e por motivo diferente do da 2.5.** Lá a `streams_` dispensa lock
+  por ser imutável; aqui a tabela muda, mas tem **dono único**: `config::stream`
+  amarra a stream a um broker (`config.h:29`) e o `main.cpp:95-96` entrega cada
+  stream ao cliente daquele broker, então quem a toca é sempre a mesma thread da
+  lib. Invariante escrito em `meta.h:23-28`. Se a Fase 6/7 puser um leitor em
+  outra thread, a decisão se reabre ali.
+- **Só a direção `tópico → id`.** O `id → tópico` é do leitor da Fase 6/7 e não
+  tem consumidor na Fase 3. Quando tiver, é um
+  `unordered_map<uint32_t, const std::string*>` apontando para as chaves do mapa
+  dono — referência a elemento de `unordered_map` sobrevive a rehash, então não
+  há segunda cópia do texto para divergir (`meta.h:64-68`).
+- **Entrada duplicada: vence a primeira, com `warn`** (`meta.cpp:224-235`). A
+  quinta decisão, que apareceu lendo o §5: não deveria existir num arquivo
+  append-only, mas a ferramenta de limpeza reescreve o arquivo inteiro. Vale a
+  primeira porque é contra ela que os registros mais antigos foram gravados; não
+  para a stream, porque não afeta a leitura dos dados.
+
+**O achado da tarefa — duas escritas e UM sync** (`meta.cpp:310-320`). A entrada
+nova e o `next_topic_id` do header são gravados e um único `sync()` cobre os
+dois. Toda combinação de queda é segura por causa do `max(header, maior id + 1)`
+da leitura: se só a entrada sobreviver, ela mesma puxa o `next_topic_id` para
+cima; se só o header sobreviver, sobra um buraco na numeração, que já é esperado.
+E o que não pode acontecer — registro apontando para id inexistente — está
+coberto porque o id só sai do `id_for` depois do `sync`.
+
+**A varredura trunca nos dois tipos de falha** (`meta.cpp:251-266`), ao contrário
+do segmento, que preserva como `.corrupt` quando a falha é de conteúdo (§8). O
+que torna isso seguro é a regra de nunca reusar id: o tópico cortado volta a ser
+tópico novo e recebe id **novo**, e os registros que usavam o id antigo caem no
+caso "`topic_id` desconhecido" do §4 — mantidos, só com o tópico irresolvível.
+
+**Testado:** 22 verificações — criação, numeração, id estável entre execuções,
+recuperação de rabo incompleto, entrada com CRC ruim, `.meta` ausente com
+segmento presente, e o caso que prova a regra: depois de truncar a tabela
+inteira, o `next_topic_id` do header segurou o valor e o tópico recuperado
+recebeu id **3**, não 0. Mais um leitor de referência em Python (só `struct` e
+`zlib`, escrito a partir da spec) que confere header e os CRCs de cinco entradas
+— confirmação independente do layout.
+
+**Fechada em 2026-09-12, com a ligação no caminho real.** O que a ligação
+decidiu, além do que já estava fechado antes do código:
+
+- **Uma tabela por stream, aberta no boot antes de conectar em broker nenhum**
+  (`main.cpp:72-77`). Vetor paralelo a `settings->streams` — mesma ordem, mesmo
+  índice; `unique_ptr` porque o `meta` segura um descritor e não é movível, e
+  nulo marca a stream que não abriu. Declarado antes dos clientes, para ser
+  destruído depois deles.
+- **Stream sem `.meta` não vira inscrição** (`main.cpp:95-96`): sem tabela não há
+  como gravar, e subscrever para descartar gastaria banda e log sem guardar nada.
+  Broker que fica sem nenhuma stream gravável não sobe cliente (`main.cpp:100`),
+  e se nenhum cliente subir o processo sai com erro em vez de dormir em loop
+  escondendo isso do operador.
+- **O tópico é resolvido antes de qualquer coisa que vá pro disco**
+  (`client.cpp:210`), porque o registro guarda o `topic_id`, não o texto. Em
+  regime custa um `find` num `unordered_map`; só na primeira vez de cada tópico
+  é que grava e sincroniza a entrada nova — o custo alto fica na estreia, não em
+  todas as mensagens.
+- **`id_for` vazio quebra o laço daquela stream e descarta em silêncio**
+  (`client.cpp:211-218`). A tabela já logou o motivo e não volta a funcionar
+  nesta execução; a política da stream que parou, e a contagem do que se perdeu,
+  são da 3.7, junto com a fila que vai receber isto. Provisório e marcado como
+  tal no código.
+- **A tabela muda sob N callbacks e continua sem lock**, agora valendo de fato: o
+  dono único prometido em `meta.h:23-28` é a thread da lib daquele broker, porque
+  o `main.cpp:95-96` só entrega a stream ao cliente do broker que a config
+  amarrou a ela (`client.cpp:182-187`).
+
+**Provado contra o broker de casa**, e não só no teste: as três streams da config
+gravaram seus `.meta` em `build/data/`; o `meta_dump.py` lê o
+`umidade_todos.meta` com quatro tópicos, CRC de todas as entradas conferido e o
+`next_topic_id` do header batendo com o efetivo.
 
 ### 3.5 — Registro: structs e codificação (sem I/O)
 `src/storage/record.*`, sobre as primitivas da 3.2. Deve ser possível gerar os

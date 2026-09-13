@@ -1,6 +1,7 @@
 #include "client.h"
 
 #include "logging.h"
+#include "meta.h"
 
 #include <mosquitto.h>
 
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -25,7 +27,7 @@ namespace mqtt {
         return mosquitto_strerror(rc);
     }
 
-    client::client(config::broker broker, std::vector<const config::stream*> streams)
+    client::client(config::broker broker, std::vector<target> streams)
         : broker_(std::move(broker)), streams_(std::move(streams)) {}
 
     client::~client() {
@@ -118,8 +120,8 @@ namespace mqtt {
         // conexao, uma vez.
         std::vector<std::string> seen;   // dedup: inclui os que falharam
         size_t requested = 0;            // so os que a lib aceitou enviar
-        for (const config::stream* st : c->streams_) {
-            for (const std::string& topic : st->topics) {
+        for (const target& t : c->streams_) {
+            for (const std::string& topic : t.cfg->topics) {
                 // Duas streams do mesmo broker podem declarar o mesmo padrao; o
                 // SUBSCRIBE repetido seria inofensivo, mas apareceria duas vezes
                 // no log e no SUBACK.
@@ -179,14 +181,17 @@ namespace mqtt {
 
         // streams_ e' imutavel desde a construcao e pertence so a este cliente,
         // entao a busca nao precisa de lock mesmo com N callbacks concorrentes.
+        // As tabelas apontadas MUDAM, mas dispensam lock pelo motivo do
+        // meta.h:23-28: a config amarra cada stream a um broker so, entao quem
+        // chama id_for e' sempre esta thread.
         //
         // TODAS as streams cujo padrao casa, nao so a primeira: duas streams
         // cobrindo o mesmo topico e' escolha de quem configurou, e com retencao
         // e replay independentes por stream isso faz sentido. Quando o writer
         // entrar, sao N push(), um por stream.
         bool matched = false;
-        for (const config::stream* st : c->streams_) {
-            for (const std::string& pattern : st->topics) {
+        for (const target& t : c->streams_) {
+            for (const std::string& pattern : t.cfg->topics) {
                 bool hit = false;
                 // Funcao da lib: trata + no meio do nivel, # so no fim, e o fato
                 // de # nao casar com $SYS. Matcher de wildcard escrito a mao
@@ -197,8 +202,24 @@ namespace mqtt {
                 if (!hit) continue;
 
                 matched = true;
-                logging::debug("[mqtt/{}] {} -> stream {} ({} bytes, ts {})", c->broker_.name,
-                               topic, st->name, msg->payloadlen, arrived_ms);
+
+                // Resolve o topico antes de qualquer coisa que va pro disco: o
+                // registro guarda o topic_id, nao o texto. Em regime custa um
+                // find num unordered_map; so na primeira vez de cada topico e'
+                // que grava e sincroniza a entrada nova.
+                const std::optional<uint32_t> topic_id = t.meta->id_for(topic);
+                if (!topic_id) {
+                    // A tabela ja logou o motivo e nao volta a funcionar nesta
+                    // execucao. Descartar em silencio aqui e' provisorio: a
+                    // politica da stream que parou, e a contagem do que se
+                    // perdeu, sao da 3.7 - junto com a fila que vai receber
+                    // isto.
+                    break;
+                }
+
+                logging::debug("[mqtt/{}] {} -> stream {} (topic_id {}, {} bytes, ts {})",
+                               c->broker_.name, topic, t.cfg->name, *topic_id, msg->payloadlen,
+                               arrived_ms);
                 // Um padrao que casa ja resolve a stream; os outros padroes dela
                 // nao mudam nada.
                 break;
